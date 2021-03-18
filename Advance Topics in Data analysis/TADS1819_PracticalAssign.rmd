@@ -1,0 +1,2549 @@
+---
+title: 'Advanced Topics in Data Science 2018/2019: Practical Assignment - Movies Recommendation'
+author: "Group 5: Catarina Alves, Francisca Conrado, Ofelia Godinho"
+date: "May 2019"
+output: 
+  bookdown::html_document2:
+    number_sections: FALSE
+    fig_caption: TRUE
+    toc: true
+    toc_depth: 2
+  bookdown::pdf_document2:
+    number_sections: FALSE
+    fig_caption: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+
+library(recommenderlab)
+library(dplyr)
+library(ggplot2)
+library(rio)
+library(tidyr)
+library(lubridate)
+library(reshape2)
+library(arules)
+library(arulesSequences)
+library(arulesViz)
+library(Hmisc)
+library(corrplot)
+library(timeDate)
+library(gridExtra)
+library(tibble)
+library(knitr)
+library(kableExtra)
+```
+
+# Introduction
+
+  On a daily basis, we are surrounded by various recommendations systems, which are imposed on us without our awareness. In general, recommendation systems are computational approaches that incorporate algorithms that aim to learn potentially useful or pleasant products to the user (1). Thus, the learning events may be based on several situations, such as more frequent events or similarity between users or products.
+
+  The use of recommendation systems has been increasing exponentially with the growth of massive use of the Internet (2). The recommendation of web pages is one of several applications of these systems, where the user visits a web page and is suggested a hyperlink to another site that may be of his liking. Another example is the online recommendation of films and series (1), such as the Rotten Tomatoes review site which, through the scores given to a movie or film, performs recommendations that will please a certain user or the general public (3). Spotify or Apple Music music recommendations, as well as suggestions for connections/friends on social networks such as LinkedIn or Facebook, are other examples.  
+
+  The aim of this project is to, through three different approaches, Popularity, Rules of Association and Collaborative Filter, predict ratings and thus obtain recommendations starting from the data set rotten tomatoes available and using different information for analysis, namely binary and non-binary.
+
+# Problem definition
+
+  The ultimate goal is to being able to make good movies recommendations from the information available on two data sets from Rotten Tomatoes. To do so, it is necessary to process the data so that it is present on a useful way and it can be used to create the various models. In order to obtain the most effective recommendation model for this project, it is essential to explore different parameters and types of recommendation systems to obtain the best results.
+
+
+# Task 1 - Exploratory data analysis and pre-processing
+
+## Data import
+
+  First, we begin by importing the data. In order to avoid that our code relies on an absolute path, as requested, we decided to create a temporary path and download the zip file into that path. Afterwards, we can extract the target tsv files, before eliminating the temporary path and zip file.
+    
+```{r Raw data import, include=FALSE}
+#creating the temporary path
+temp <- tempfile() 
+#downloading the zip file
+dl <- download.file('https://material:tads1819@www.dcc.fc.up.pt/~rpribeiro/aulas/tads1819/material/rotten-tomatoes.zip',temp) 
+#importing the movie_info.tsv file and the reviews.tsv file
+movie_info <- read.delim(unz(temp, "movie_info.tsv"), na.strings = c(""," ", 'NA'),stringsAsFactors = F) 
+reviews <- read.delim(unz(temp, "reviews.tsv"),na.strings = c(""," ", 'NA'),stringsAsFactors = F) 
+#eliminate the temporary path and the zip file
+rm(temp) 
+rm(dl)
+```
+In this assignment, the data set includes two files:
+
+  * _movie_info.tsv_ : a file that provide additional information on the movies reviewed by the critics;   
+  
+  * _reviews.tsv_:  a file with information regarding each review.
+  
+We will first pre-process each file individually. 
+
+## Pre-processing
+
+### Reviews
+The reviews.tsv file contains a data frame with 8 variables and 54432 observations.
+```{r reviews analysis, include=FALSE}
+#str(reviews) #inspect internal structure
+```
+In this data set, each observation represents a review by a specific critic. The variables available are:
+
+  * **_id_**: id of the movie reviewed by the critics;
+  
+  * **_review_**: the review written by each critic for the movie in question;
+  
+  * **_rating_**: rating given by the critic; can be displayed in different scales;  
+  
+  * **_fresh_**: a binary metric related to the Tomatometer score; if a movie has a rating above 60%  it displays the "fresh" status; it displays its "rotten" status otherwise;
+
+  * **_critic_**: name of the critic;
+  
+  * **_top_critic_**: binary classification by activity relevance of critics 
+  
+  * **_publisher_**: what magazine, journal, website, etc., the review was published on;
+  
+  * **_date_**: date of publication of the review;
+
+We started by analyzing the presence of NA's in the data-set.
+```{r include=FALSE}
+any(is.na(reviews))
+```
+
+```{r, echo=FALSE,fig.cap="TESTS" }
+rownames <- as.list.factor(names(reviews))
+colnames <- as.list(c('Valid', 'NA'))
+dimnames <- list(rownames,colnames)
+n_row = length(reviews)
+natable_reviews <- matrix('0',nrow =n_row, ncol = 2, dimnames = dimnames, byrow = TRUE)
+for (i in 1:length(reviews)){
+  if(any(is.na(reviews[[i]])) == TRUE) {natable_reviews[i,1] = sum(is.na(reviews[i])==FALSE);natable_reviews[i,2] = sum(is.na(reviews[i]))} else {natable_reviews[i,1] = sum(is.na(reviews[i])==FALSE)}
+}
+class(natable_reviews) <- "numeric"
+natable_reviews <- natable_reviews[order(natable_reviews[,2],decreasing = TRUE),]
+knitr::kable(natable_reviews, caption = "NA analysis among variables.") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F)
+
+rm(rownames)
+rm(colnames)
+rm(dimnames)
+rm(natable_reviews)
+rm(n_row)
+rm(i)
+```
+
+
+Since our goal is to recommend top N movies for a given reviewer, we remove the observations that are lacking a critic. After that, we realized that this step removed the NA present on the remaining variables as well and thus our data set is free of NA values.
+```{r NA omit, include=FALSE}
+reviews=na.omit(reviews, cols="critic") #removes rows with NA in the column critics
+```
+
+Afterwards, we analyse the remaining variables and noticed that the _date_ variable is set as character. To allow its use, we converted this into a date format with the package _lubridate_. Besides that, we also derived two new variables from this: Year and Month. 
+```{r convert date, include=FALSE}
+reviews[,8] <- mdy(reviews[,8]) #converts from character to date class
+reviews<-mutate(reviews, Year=year(reviews[,8]), Month=month(reviews[,8])) # derives month and year into a new column
+```
+
+
+Another issue was the rating scales. The variable rating contains two types of rating scales, with different versions:
+```{r rating scales types, include=FALSE}
+unique(reviews$rating)
+```
+ * Numeric scales:
+    + from 0 to 2 
+    + from 0 to 4
+    + from 0 to 5
+    + from 0 to 6
+    + from 0 to 8
+    + from 0 to 10
+ * Alphabetic scale:
+    + from A+ to F-
+    
+To allow it use, all the different scales were converted to the scale from 0 to 5 which we discover to be the most frequent. Furthermore, numeric scales also presented different lexical representations since some had the "/" as separator (as in 2/5) while a scale from 0 to 10 did not. To deal with this, we first started to convert the numeric rating values where the character "/" was not found. Next, all the numeric ratings where the character "/" was found were converted, according to the value on the right hand side of the separator. Finally, the alphabetic scale was converted considering that the each letter representation corresponds to a value within a scale from 1 (F-) to 18 (A+). 
+
+Along the way we came across a couple errors that lead to the elimination of the correspondent entry since we were not able to correct them or understand it meaning. For instance, two ratings of T and N were found, and also numeric ratings of "3/2" and "3 2/4".
+
+Afterwards, all ratings were converted to a numeric type so they can be used for posterior statistical analysis.
+```{r remove T, include=FALSE}
+reviews = reviews[!reviews$rating == "T",]
+reviews = reviews[!reviews$rating == "N",]
+reviews = reviews[!reviews$rating == "3 1/2",]
+
+for (i in 1:nrow(reviews)){if (reviews$rating[i]=='1-5'){reviews$rating[i]='1/5'}}
+rm(i)
+```
+
+
+
+```{r Rating scales, include=FALSE}
+
+x=reviews[!(grepl("/",reviews$rating)),]
+x=x[!(x$rating %in% c("A+","A","A-","B+","B","B-","C+","C","C-","D+","D","D-","F+","F","F-")),]
+alterar=rownames(x)
+
+for (i in 1:length(reviews$rating)) {
+  if (rownames(reviews[i,]) %in% alterar){reviews$rating[i]= as.numeric(reviews$rating[i])*5/10}}
+
+convert = function(i){
+  x=as.integer(unlist(strsplit(as.character(i),"/"))[2])
+  y=as.integer(unlist(strsplit(as.character(i),"/"))[1])
+  if (x == 5){i=y} 
+  else if (x == 4){i=as.numeric(round(y*5/4,1))}
+  else if (x == 10){i=as.numeric(round(y*5/10,1))}
+  else if (x == 6){i=as.numeric(round(y*5/6,1))}
+  else if (x == 8){i=as.numeric(round(y*5/8,1))} else {i=y}}
+
+#conversao escalas numericas
+for (i in 1:length(reviews$rating)){
+  if (grepl("/",reviews$rating[i])) {reviews$rating[i]= convert(reviews$rating[i])}}
+
+ 
+#conversao escala alfabética
+for (i in 1:length(reviews$rating)){
+  if (reviews$rating[i] %in% c("A+","A","A-","B+","B","B-","C+","C","C-","D+","D","D-","F+","F","F-")) {
+    if (reviews$rating[i]=="A+"){reviews$rating[i]=round(18*5/18,1)}
+    else if (reviews$rating[i]=="A-"){reviews$rating[i]=round(17*5/18,1)}
+    else if (reviews$rating[i]=="A"){reviews$rating[i]=round(16*5/18,1)}
+    else if (reviews$rating[i]=="B+"){reviews$rating[i]=round(15*5/18,1)}
+    else if (reviews$rating[i]=="B"){reviews$rating[i]=round(14*5/18,1)}
+    else if (reviews$rating[i]=="B-"){reviews$rating[i]=round(13*5/18,1)}
+    else if (reviews$rating[i]=="C+"){reviews$rating[i]=round(12*5/18,1)}
+    else if (reviews$rating[i]=="C"){reviews$rating[i]=round(11*5/18,1)}
+    else if (reviews$rating[i]=="C-"){reviews$rating[i]=round(10*5/18,1)}
+    else if (reviews$rating[i]=="D+"){reviews$rating[i]=round(9*5/18,1)}
+    else if (reviews$rating[i]=="D"){reviews$rating[i]=round(8*5/18,1)}
+    else if (reviews$rating[i]=="D-"){reviews$rating[i]=round(7*5/18,1)}
+    else if (reviews$rating[i]=="F+"){reviews$rating[i]=round(3*5/18,1)}
+    else if (reviews$rating[i]=="F"){reviews$rating[i]=round(2*5/18,1)}
+    else if (reviews$rating[i]=="F-"){reviews$rating[i]=round(1*5/18,1)}
+    else {reviews$rating[i]=reviews$rating[i]}
+  }
+}
+
+reviews$rating <- as.numeric(reviews$rating)
+
+rm(i)
+rm(x)
+rm(alterar)
+rm(convert)
+```
+
+Firstly, we analysed the resulting distributing by plotting the movie count per rating. We can see in Figure 1 that rating distribution doesn't seem to follow any particular pattern.
+```{r echo=FALSE, fig.align = "center", fig.width=7, fig.height=4, fig.cap='Rating distribution'}
+ 
+ggplot(reviews, aes(x=reviews$rating)) + geom_histogram(aes(y=..density..)) +  labs(title ="Rating distribution",  x = "Rating") +geom_density()
+
+```
+
+We then decided to assess the top 10 most reviewed movies, and the proportion of fresh/rotten reviews each movie received.
+```{r echo=FALSE, fig.align = "center", fig.width=7, fig.height=4,fig.cap="Top 10 most reviewed movies and their fresh/rotten status"}
+#existem 1055 filmes; mostra os que tem mais criticas
+revbyid <- reviews %>% 
+  dplyr::group_by(id) %>%
+  dplyr::summarise(Nr_of_reviews = length(id))
+
+top100byid <- top_n(revbyid, 100, Nr_of_reviews)
+top100movies <- as.list(top100byid$id)
+
+rm(top100byid)
+```
+
+
+
+```{r boxplot by year, include=FALSE}
+
+boxplot <- ggplot(reviews, aes(y=reviews$Year)) + geom_boxplot() +  labs(title ="Years distribution")+ scale_y_continuous(name = "Year", breaks = c(1950,1955,1960,1965,1970,1975,1980,1985,1990,1995,2000,2005,2010,2015,2020), labels = waiver(), limits = c(1955,2019)) + coord_fixed(ratio=0.02)
+
+```
+
+
+```{r mean rating by year, include=FALSE}
+dates_count <- reviews %>% 
+  dplyr::group_by(Year) %>% 
+  dplyr::summarise(Count = length(id)) %>% 
+  dplyr::ungroup() 
+dates_count <- dates_count[dates_count$Count >=2,]
+
+
+
+dates_meanrating <- reviews %>% 
+  dplyr::group_by(Year) %>% 
+  dplyr::summarise(Mean_rating = mean(rating)) %>% 
+  dplyr::ungroup() 
+dates_meanrating <- dates_meanrating[dates_meanrating$Year %in% dates_count$Year,]
+
+datesplot <- ggplot(data = dates_meanrating, aes( x = Year, y= Mean_rating)) + 
+  geom_point() + labs(title ="Mean rating by year", x = "Year", y = "Mean Rating") + scale_y_continuous(limits = c(2.5,4)) + geom_line() + coord_fixed(ratio=7)
+
+
+rm(dates_meanrating)
+
+```
+
+Next we decided to analyse the distribution of reviews per year. As we can see in Figure 2, most reviews are concentrated around 2000 to 2015.On the right side of Figure 2, we can also see that the mean rating of reviews per year is not a steady variable and thus should be taken into consideration. 
+```{r echo=FALSE, fig.align = "center",fig.cap="Years visual analysis"}
+datesplot <- ggplotGrob(datesplot)
+boxplot <- ggplotGrob(boxplot)
+grid.arrange(boxplot,datesplot,nrow=1)
+```
+
+```{r Top 10 critics, echo=FALSE}
+
+revbycritic <- reviews %>% 
+  dplyr::group_by(critic) %>%
+  dplyr::summarise(Nr_of_reviews = length(critic))
+
+
+top100critic <- top_n(revbycritic,100, Nr_of_reviews)
+top100critic <- arrange(top100critic,desc(Nr_of_reviews))
+top100critics <- as.list(top100critic$critic)
+
+
+
+
+```
+
+
+
+### Movie Info
+
+The movie_info.tsv file contains a data frame with 12 variables and 1560 observations.
+
+```{r movie info analysis, include=FALSE}
+#str(movie_info)
+```
+In this case, each observation represents a movie, and the variables different attributes from the movie. The variables available are:
+
+  * **_id_**: id of the movie; matches the one in the review data frame;
+  
+  * **_synopsis_**: description of the movie;
+  
+  * **_rating_**: a rating scale regarding the film's suitability for certain audiences based on its content;
+  
+  * **_genre_**: movie category;
+  
+  * **_director_**: director(s) of the movie;
+
+  * **_writer_**: writer(s) of the movie;
+
+  * **_theater_date_**: when the movie premiered in movie theaters;
+
+  * **_DVD_date_**: when the movie was released as a DVD;
+  
+  * **_currency_**: currency in which box office results are shown;
+  
+  * **_box_office_**: the amount of money obtained by sales of tickets to the movie;
+  
+  * **_run-time_**: length of the movie;
+  
+  * **_studio_**: studio responsible for the movie;
+
+After the processing of reviews data frame, some movies present in *movie_info* did not have any reviews. So it was important to first select the remaining movies ID. We will also analyse the number of reviews per movie and the mean rating of each movie.
+```{r subseting of movie_info, include=FALSE}
+ids <- reviews %>% 
+  dplyr::group_by(id) %>% 
+  dplyr::summarise(Mean_rating = mean(rating), Count = length(id)) %>% 
+  dplyr::ungroup() 
+remaining_id <- as.list(ids$id)
+movie_info <- movie_info[movie_info$id %in% remaining_id,]
+movie_info <- dplyr::left_join(movie_info,ids,  by = "id")
+
+```
+
+
+We start of once again by analyzing the presence of missing values in this data-frame.
+```{r include=FALSE}
+#any(is.na(movie_info))
+```
+
+```{r NA analysis movies, echo=FALSE}
+rownames <- as.list.factor(names(movie_info))
+colnames <- as.list(c('Valid', 'NA'))
+dimnames <- list(rownames,colnames)
+n_row = (length(movie_info))
+
+natable_movies <- matrix('0',nrow =n_row, ncol = 2, dimnames = dimnames, byrow = TRUE)
+
+for (i in 1:length(movie_info)){
+  if(any(is.na(movie_info[[i]])) == TRUE) {natable_movies[i,1] = sum(is.na(movie_info[i])==FALSE);natable_movies[i,2] = sum(is.na(movie_info[i]))} else {natable_movies[i,1] = sum(is.na(movie_info[i])==FALSE)}
+}
+
+class(natable_movies) <- "numeric"
+```
+```{r, echo=FALSE}
+natable_movies <- natable_movies[order(natable_movies[,2],decreasing = TRUE),]
+kable(natable_movies, caption = "NA analysis among variables") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F)
+
+rm(rownames)
+rm(colnames)
+rm(dimnames)
+rm(natable_movies)
+rm(i)
+rm(n_row)
+
+
+```
+
+From results in table 2, we can conclude that too many movies are lacking values for the variables *currency*, *box_office* and *studio*. Because of this, we will discard these variables from further analysis.
+```{r include=FALSE}
+movie_info <- dplyr::select(movie_info, -currency,-box_office, -studio)
+```
+
+The second issue we observe in this data frame is that *theater_date*, *DVD_date* are not in the class date but as characters. Once again we resort to package *lubridate* to process this information. We also extracted Year_theater from *theater_date*, and Year_DVD from *DVD_date*;
+```{r processing, include=FALSE}
+movie_info[,7] <- mdy(movie_info[,7]) #convert date of theater_date
+movie_info[,8] <- mdy(movie_info[,8]) #convert date of dvd_date
+movie_info<-mutate(movie_info, Year_theater=year(movie_info[,7]), Year_dvd=year(movie_info[,8]))
+```
+
+On the other hand, the variable *runtime* is displayed as character, but should be numeric. It also includes extra characters ("minutes") that should be removed.
+```{r include=FALSE}
+for (i in 1:length(movie_info$runtime)) {movie_info$runtime[i] <- gsub(" minutes", "",movie_info$runtime[i])} #remove "minutes" characters
+movie_info$runtime <- as.numeric(movie_info$runtime) #convert to numeric
+rm(i)
+```
+
+Finally, the variables *genre*, *director* and *writer* can contain more than one name per observation, thus it should be split as different individuals to allow a correct analysis.
+```{r Genre processing, include=FALSE}
+
+#separate the different genres
+genrelist <- vector("list")
+for (i in 1:length(movie_info$genre)) { 
+  if (grepl("|", movie_info$genre[i]) == TRUE)  { 
+    genrelist[i] <- strsplit(movie_info$genre[i], "[|]")}   else {genrelist[i] = movie_info$genre[i]}
+} 
+#pass it to the dataframe
+movie_info <- mutate(movie_info, "genreP" = genrelist )
+rm(genrelist)
+
+#get unique genre names
+genres <- c()
+x = 1
+for (i in 1:length(movie_info$genreP)) {
+  for (y in 1:length(movie_info$genreP[[i]])) {
+    if (!(movie_info$genreP[[i]][y] %in% genres)) {
+      genres[x] <- movie_info$genreP[[i]][y];
+      x = x +1
+    }
+  }
+}
+
+genres <- na.omit(genres)
+
+#get binary matrix with genre info, and count the movies per genre
+
+rownames <- as.list(genres)
+colnames <- as.list(c("Count","Mean Rating"))
+dimnames <- list(rownames,colnames)
+n_row = (length(rownames))
+matrix_CFG <- matrix('0',nrow =n_row, ncol = 2, dimnames = dimnames, byrow = TRUE)
+
+rownames <- as.numeric(movie_info$id)
+rownames <- na.omit(rownames)
+colnames <- as.list(genres)
+dimnames <- list(rownames,colnames)
+n_row = (length(rownames))
+n_col = (length(colnames))
+matrix_genre <- matrix('0',nrow =n_row, ncol = n_col, dimnames = dimnames, byrow = TRUE)
+
+for (i in 1:n_row){
+   for (x in 1:n_col) { 
+     for (y in 1:length(movie_info$genreP[[i]])) {
+      if (identical(movie_info$genreP[[i]][y],genres[x])) {
+        matrix_genre[i,x] = 1;
+        matrix_CFG[genres[x],"Count"] = as.numeric(matrix_CFG[genres[x],"Count"]) + 1;
+        matrix_CFG[genres[x],"Mean Rating"] = as.numeric(as.numeric(matrix_CFG[genres[x],"Mean Rating"]) + as.numeric(movie_info$Mean_rating[i]))
+      }
+     }
+   }
+}
+     
+
+class(matrix_genre) <- "numeric"
+
+
+for (i in 1:length(matrix_CFG[,1])) { 
+  matrix_CFG[i,"Mean Rating"] = as.numeric(as.numeric(matrix_CFG[i,"Mean Rating"]) / (as.numeric(matrix_CFG[i,"Count"])))
+  }
+
+class(matrix_CFG) <- "numeric"
+df_CFG_g <- as.data.frame(matrix_CFG)
+
+rm(matrix_CFG)
+rm(i)
+rm(rownames)
+rm(colnames)
+rm(n_row)
+rm(dimnames)
+rm(n_col)
+rm(x)
+rm(y)
+
+```
+The separation allowed us to obtain 21 individual genres, which are displayed on Figure 3 along with each movie count.  
+```{r echo=FALSE, fig.align = "center", fig.cap="Movie count per genre", fig.width=7, fig.height=4}
+
+gcp <- ggplot(data = df_CFG_g, aes( x = row.names(df_CFG_g), y= df_CFG_g$Count)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + labs(x = "Movie Genre", y = "Count") + theme(text = element_text(size=10))
+gcp
+```
+.  
+
+```{r director processing, include=FALSE}
+#separate the different directors 
+directorlist <- vector("list")
+for (i in 1:length(movie_info$director)) { 
+  if (grepl("|", movie_info$director[i]) == TRUE)  { 
+    directorlist[i] <- strsplit(movie_info$director[i], "[|]")}   else {directorlist[i] = movie_info$director[i]}
+} 
+
+
+movie_info <- mutate(movie_info, "directorP" = directorlist )
+rm(directorlist)
+
+
+directors <- c()
+x = 1
+for (i in 1:length(movie_info$directorP)) {
+  for (y in 1:length(movie_info$directorP[[i]])) {
+    if (!(movie_info$directorP[[i]][y] %in% directors)) {
+      directors[x] <- movie_info$directorP[[i]][y];
+      x = x +1
+    }
+  }
+}
+
+directors <- na.omit(directors)
+
+
+#pass table to binary
+rownames <- as.list(directors)
+colnames <- as.list(c("Count","Mean Rating"))
+dimnames <- list(rownames,colnames)
+n_row = (length(rownames))
+matrix_CFD <- matrix('0',nrow =n_row, ncol = 2, dimnames = dimnames, byrow = TRUE)
+
+rownames <- as.numeric(movie_info$id)
+rownames <- na.omit(rownames)
+colnames <- as.list(directors)
+dimnames <- list(rownames,colnames)
+n_row = (length(rownames))
+n_col = (length(colnames))
+matrix_directors <- matrix('0',nrow =n_row, ncol = n_col, dimnames = dimnames, byrow = TRUE)
+
+for (i in 1:n_row){
+   for (x in 1:n_col) { 
+     for (y in 1:length(movie_info$directorP[[i]])) {
+      if (identical(movie_info$directorP[[i]][y],directors[x])) {
+        matrix_directors[i,x] = 1;
+        matrix_CFD[directors[x],"Count"] = as.numeric(matrix_CFD[directors[x],"Count"]) + 1;
+        matrix_CFD[directors[x],"Mean Rating"] = as.numeric(as.numeric(matrix_CFD[directors[x],"Mean Rating"]) + as.numeric(movie_info$Mean_rating[i]))
+      }
+     }
+   }
+}
+     
+
+class(matrix_directors) <- "numeric"
+
+
+
+rm(i)
+
+for (i in 1:length(matrix_CFD[,1])) {matrix_CFD[i,"Mean Rating"] = as.numeric(as.numeric(matrix_CFD[i,"Mean Rating"]) / (as.numeric(matrix_CFD[i,"Count"]))) }
+
+class(matrix_CFD) <- "numeric"
+
+df_CFD_g <- as.data.frame(matrix_CFD)
+df_CFD_g <- df_CFD_g[df_CFD_g$Count >2,]
+df_CFD_g <- na.omit(df_CFD_g)
+
+
+
+rm(rownames)
+rm(colnames)
+rm(n_row)
+rm(dimnames)
+rm(i)
+rm(n_col)
+rm(x)
+rm(y)
+rm(matrix_CFD)
+
+```
+A similar analysis was performed for movie's director (Figure 4). We represented only the directors with a minimum of three movies to reduce the variable dimension and end up with a total of 24 individuals. In general, the movie count is quite low, with exception for Steven Spielberg and Clint Eastwood who stand out from the remaining. 
+```{r echo=FALSE, fig.align = "center", fig.cap="Movie count per director. Here are represented only the directors with at least three movies.", fig.width=7, fig.height=4}
+
+dcp <- ggplot(data = df_CFD_g, aes( x = row.names(df_CFD_g), y= df_CFD_g$Count)) + 
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + labs(title ="Movie counts per director", x = "Movie Director", y = "Count") + theme(text = element_text(size=10))
+dcp
+```
+
+
+```{r Writer processing, include=FALSE}
+#separate the different writers 
+writerlist <- vector("list")
+for (i in 1:length(movie_info$writer)) { 
+  if (grepl("|", movie_info$writer[i]) == TRUE)  { 
+    writerlist[i] <- strsplit(movie_info$writer[i], "[|]")}   else {writerlist[i] = movie_info$writer[i]}
+} 
+
+movie_info <- mutate(movie_info, "writerP" = writerlist )
+
+writers <- c()
+x = 1
+for (i in 1:length(movie_info$writerP)) {
+  for (y in 1:length(movie_info$writerP[[i]])) {
+    if (!(movie_info$writerP[[i]][y] %in% writers)) {
+      writers[x] <- movie_info$writerP[[i]][y];
+      x = x +1
+    }
+  }
+}
+
+writers <- na.omit(writers)
+
+
+#pass table to binary
+rownames <- as.list(writers)
+colnames <- as.list(c("Count","Mean Rating"))
+dimnames <- list(rownames,colnames)
+n_row = (length(rownames))
+matrix_CFW <- matrix('0',nrow =n_row, ncol = 2, dimnames = dimnames, byrow = TRUE)
+
+rownames <- as.numeric(movie_info$id)
+rownames <- na.omit(rownames)
+colnames <- as.list(writers)
+dimnames <- list(rownames,colnames)
+n_row = (length(rownames))
+n_col = (length(colnames))
+matrix_writers <- matrix('0',nrow =n_row, ncol = n_col, dimnames = dimnames, byrow = TRUE)
+
+for (i in 1:n_row){
+   for (x in 1:n_col) { 
+     for (y in 1:length(movie_info$writerP[[i]])) {
+      if (identical(movie_info$writerP[[i]][y],writers[x])) {
+        matrix_writers[i,x] = 1;
+          matrix_CFW [writers[x],"Count"] = as.numeric(matrix_CFW[writers[x],"Count"]) + 1; matrix_CFW[writers[x],"Mean Rating"] = as.numeric(as.numeric(matrix_CFW[writers[x],"Mean Rating"]) + as.numeric(movie_info$Mean_rating[i]))
+      }
+     }
+   }
+}
+     
+
+class(matrix_writers) <- "numeric"
+
+
+rm(i)
+
+for (i in 1:length(matrix_CFW[,1])) { matrix_CFW[i,"Mean Rating"] = as.numeric(as.numeric(matrix_CFW[i,"Mean Rating"]) / (as.numeric(matrix_CFW[i,"Count"]))) }
+
+class(matrix_CFW) <- "numeric"
+
+df_CFW_g <- as.data.frame(matrix_CFW)
+df_CFW_g <- df_CFW_g[df_CFW_g$Count >2,]
+df_CFW_g <- na.omit(df_CFW_g)
+
+
+rm(rownames)
+rm(colnames)
+rm(n_row)
+rm(dimnames)
+rm(n_col)
+rm(matrix_CFW)
+rm(writerlist)
+rm(i)
+rm(x)
+rm(y)
+```
+
+Once more, a similar analysis was performed for movie's writers (Figure 5). We represented only the writers with at least three movies, ending up with a total of 21 individuals.  
+```{r echo=FALSE, fig.align = "center", fig.cap="Movie count per writer. Here are represented only the writers with at least three movies.", fig.width=7, fig.height=4}
+
+wcp <- ggplot(data = df_CFW_g, aes( x = row.names(df_CFW_g), y= df_CFW_g$Count)) + 
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + labs(title ="Movie counts per writer", x = "Movie Writer", y = "Count") 
+wcp
+```
+
+
+### Visual Analysis
+
+To evaluate the effect of different variables on the the rating of a review, the mean rating by different grouped variables was assessed.
+
+As we can see on Figure 6, the rating of a movie influences the rating of its review, with PG-13 having a lower mean rating than all other ratings.
+
+```{r echo=FALSE, fig.cap="Mean rating of reviews per movie rating" , fig.align="center", fig.width=7, fig.height=4}
+rating_y <- movie_info %>% 
+  dplyr::group_by(rating) %>% 
+  dplyr::summarise(Mean_rating = mean(Mean_rating)) %>% 
+  dplyr::ungroup()
+rating_y <- rating_y[2:6,]
+
+ggplot(rating_y,aes(rating, Mean_rating, group = 1)) + geom_point() + ggtitle("Mean rating by rating") + labs(title ="Mean rating by rating", x = "Rating", y = "Mean rating") + geom_line() + scale_y_continuous(limits = c(2.5,4))
+
+rm(rating_y)
+```
+Furthermore, as we can can see o Figure 7, the run-time of the movie also influences the mean rating, with longer movies having better ratings. 
+
+
+```{r echo=FALSE, fig.cap="Mean rating of reviews per movie runtime." , fig.align="center", fig.width=7, fig.height=4}
+runtime <- movie_info %>%
+  dplyr::group_by(runtime) %>% 
+  dplyr::summarise(Mean_rating = mean(Mean_rating)) %>% 
+  dplyr::ungroup()
+
+ggplot(runtime,aes(data = runtime, x = runtime, y = Mean_rating)) + geom_point()+
+  ggtitle("Mean rating by runtime") + labs(title ="Mean rating by runtime", x = "Run-time", y = "Mean rating") + geom_smooth(method = "lm") 
+
+rm(runtime)
+```
+With regard to movie genre, Figure 8 shows that mean rating does not have a consistent behavior although we believe that it is highly influenced by the great differences in movies counts. Indeed, the movies with fewer counts are the ones that exhibit the most dissimilar ratings. 
+
+```{r echo=FALSE, fig.align = "center", fig.cap="Mean rating by movie genre. Top graphic represents mean rating per genre, while bottom graphic represents the movie count per genre."}
+gmp <- ggplot(data = df_CFG_g,aes(x = row.names(df_CFG_g), y = df_CFG_g$`Mean Rating`)) + geom_point() +
+  ggtitle("Mean rating by Genre") + labs( y = "Mean rating") +  theme(axis.text.x = NULL) + scale_y_continuous(limits = c(2.25,4)) + theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) + theme(text = element_text(size=10)) 
+
+g2 <- ggplotGrob(gcp)
+g3 <- ggplotGrob(gmp)
+g <- rbind(g3, g2, size = "first")
+g$widths <- unit.pmax(g2$widths, g3$widths)
+grid.newpage()
+grid.draw(g)
+
+```
+On the other hand, most directors have less then 5 movies and yet we can still observe some differences in mean rating values (figure 9).
+```{r echo=FALSE, fig.align = "center", fig.cap="Mean rating by director. Top graphic represents mean rating per director, while bottom graphic represents the movie count per director."}
+dmp <- ggplot(data = df_CFD_g,aes(x = row.names(df_CFD_g), y = df_CFD_g$`Mean Rating`)) + geom_point() +ggtitle("Mean rating by Director") + labs(title ="Mean rating by Director", x = "Director", y = "Mean rating") + theme(axis.text.x = NULL) + scale_y_continuous(limits = c(2,4.5)) + theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) + theme(text = element_text(size=10)) 
+g2 <- ggplotGrob(dcp)
+g3 <- ggplotGrob(dmp)
+g <- rbind(g3, g2, size = "first")
+g$widths <- unit.pmax(g2$widths, g3$widths)
+grid.newpage()
+grid.draw(g)
+```
+
+```{r echo=FALSE, fig.align = "center", fig.cap="Mean rating by writer. Top graphic represents mean rating per writer, while bottom graphic represents the movie count per writer."}
+wmp <- ggplot(data = df_CFW_g,aes(x = row.names(df_CFW_g), y = df_CFW_g$`Mean Rating`)) + geom_bar(stat = "identity") +   ggtitle("Mean rating by Writer") + labs(title ="Mean rating by Writer", x = "Writer", y = "Mean rating") +  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + scale_y_continuous(limits = c(0,5))
+
+```
+
+# Task 2 - Learn recommender systems using binary and non-binary information
+
+
+## Modeling approaches
+
+This section is destined to present a brief description of the modeling approaches applied with respective demonstration for a set of critics. In this particular case, we choose to work with a small data set composed by 6 critics and 10 movies that can be consulted in Table 3. The first 5 critics were used to train the models and the last one to make the predictions. To do so, binary and non-binary data were taken into account (Figure 10 and 11) and three different modeling approaches were applied: popularity, association rules and collaborative filtering.
+
+```{r data preparation, include=FALSE}
+critics_set = top100critics[11:16]
+movies_set=top100movies[20:29]
+
+reviews_small=reviews[reviews$critic %in% critics_set,]
+reviews_small=reviews_small[reviews_small$id %in% movies_set,]
+
+reviews_small=reviews_small[,c("id","critic","rating")]
+reviews_small=data.frame(Critics=reviews_small[,2], Movies=reviews_small[,1], Ratings=reviews_small[,3])
+
+
+binary_demo=as(reviews_small, "binaryRatingMatrix")
+critics=rownames(binary_demo)
+x=data.frame(Critics=c(critics), inspect(getRatingMatrix(binary_demo)))
+
+```
+
+```{r echo=FALSE, fig.align="center", fig.cap="Set of critics and movies used to make de modeling approaches demonstration "}
+kable(x, caption = "Data set used for modeling approaches demonstration") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F)
+
+
+```
+
+
+```{r echo=FALSE, fig.align="center", fig.cap="Heatmap representing binary data", fig.height=5, fig.width=5}
+
+binary_demo_mt=as(binary_demo, "matrix")
+binary_demo_mt[1]=1
+binary_demo_mt
+image(binary_demo, xlab="Movies", ylab="Critics", sub= " ")
+
+train_binary_demo=binary_demo[1:5,]
+test_binary_demo=binary_demo[6,]
+
+
+```
+```{r echo=FALSE, fig.align="center", fig.cap="Heatmap representing non-binary data considering each crtic's rating to each movie. ", fig.height=5, fig.width=5}
+
+n_binary_demo=as(reviews_small, "realRatingMatrix")
+getRatingMatrix(n_binary_demo)
+image(getRatingMatrix(n_binary_demo), xlab="Movies", ylab="Critics", sub=" ")
+
+n_binary_demo_mt=as(n_binary_demo, "matrix")
+
+
+train_nonbinary_demo=n_binary_demo[1:5,]
+test_nonbinary_demo=n_binary_demo[6,]
+
+rm(reviews_small)
+rm(binary_demo)
+```
+
+###Popularity
+
+Popularity based recommendation-systems are the most simple, non-personalized models which generate recommendations solely on the popularity of items, i. e., the number of users who have the item in their profile. These models are  predominantly applied when there is not much information available about a certain user’s preference and hence a popular item among many users will probably also appeal to a generic user. However, popular items may be widely liked and hence their ratings carry little useful information for constructing the user's profile. Besides, these recommender systems do not take in consideration any information of the users likes and dislikes what can harm recommendation quality. Even so, their performance is usually satisfactory. 
+
+The movies in the set are displayed below in decreasing order of popularity. 
+
+
+```{r binary popularity, echo = FALSE}
+
+modelPOP <- Recommender(train_binary_demo, "POPULAR")
+model_pop=getModel(modelPOP)
+getList(model_pop$topN)
+
+```
+However, since Scott Weinberg had already seen the movies indexed by 443 and 458 and attending to the three most popular, only the following could/would be recommended. 
+
+```{r , echo=FALSE}
+pred=predict(modelPOP, test_binary_demo, n=3)
+getList(pred)
+
+rm(modelPOP)
+rm(model_pop)
+rm(pred)
+
+
+```
+
+###Association Rules
+Association rules have been widely used in many fields to extract significant associations between variables in large databases, including in market basket analysis and recommendation systems. The ultimate goal of association rules algorithms is to mimic human capability of extracting abstract associations from uncategorized data. In the context of recommender systems, user’s behavior  is used to infer valuable connections that allow the development of personalized recommendations of items, such as, users that like this item will probably also like this item. 
+One disadvantage of this approach is that a large number of rules are produced in every application and most of the rules do not present useful information, i.e., they are redundant or too obvious. Moreover, although there are some measures of the rule’s interestingness, there is no way of discarding useless sets of rules but to individually infer it relevance on the domain’s optic. Although it presents usually good results, these aspects can difficult it application to certain tasks. 
+
+In the first place, 233 rules were obtained using a minimum support of 0.1 and minimum confidence of 0.8. After eliminating the rules that contained the already seen movies on the right hand side, the ones that lacked the already seen movies on the left hand side and also adjusting the support and confidence threshold for 0.8, a total of seven rules were obtained (Figure 12). 
+
+```{r binary association rules, include=FALSE}
+modelAR=Recommender(train_binary_demo,"AR")
+model_ar=getModel(modelAR)
+model_ar$rule_base  #233 regras
+rules.sub= subset(model_ar$rule_base, subset=!(rhs %in% c("443","458")))
+rules.sub= subset(rules.sub, subset=lhs %in% c("443","458"))
+rules.sub # 48 regras
+summary(rules.sub)
+```
+
+```{r, echo=FALSE,fig.cap="Plot of the final 7 rules selected. " , fig.align="center"}
+
+
+rules.sub= subset(rules.sub, subset= confidence>= 0.8 & support>=0.8)
+inspect(rules.sub)
+plot(rules.sub, method="graph")
+
+```
+
+```{r include=FALSE}
+pred=predict(modelAR, test_binary_demo, n=3)  #esta a recomendar coisas que ja viu
+getList(pred)
+
+rm(modelAR)
+rm(model_ar)
+rm(rules.sub)
+rm(pred)
+
+```
+
+From the analysis of the set of rules we can conclude with 100% confidence that Scott Weinberg, whom have seen movies indexed by 443 and 458, will probably also like the movie indexed by 564, according to rules number 1 and 2. Furthermore, we can also infer with 80% confidence that the user in cause will probably also like movies indexed by 418 and 610, supported by rules numbers 6 and 7, respectively. Hence, the movies to be recommended to Scott would be the ones represented by the ids 564,418 and 610.
+
+
+###Collaborative Filtering
+Finally, collaborative filtering approach rely on delivering recommendations to a certain active user based on the leverage knowledge of a community of similar users or items identical to the ones he had liked or seen in the past. Therefore, collaborative filtering models can be divided in two  categories: user-based collaborative filtering (UBCF) or item-based collaborative filtering (IBCF). The first concept delivers recommendations to a certain user based on items that others users with similar tastes liked in the past, independently of the item’s content. The similarity between two users is determined by each behavior regarding item’s acquisition or rating, for binary or non-binary metrics respectively. That is to say, similar users have similar ratings/interest on the same item.  On the other hand, IBCF recommendations are made based on the similarity among items which is given by the resemblance of the ratings/interest received from a given user. The combination of all users feedback is then used to cluster the items in similar sets. This way, the information provided by a particular user on a set of items is used to predict his interest on a similar unseen item. Cosine similarity, Pearson correlation coefficient and jaccard index are some of the similarity measures that can be use in this studies.
+
+For the UBCF model using binary data the following similarity matrix was obtained when jaccard index was applied as similarity measure (Table 4). 
+```{r binary UBCF, echo=FALSE}
+
+modelbinaryUBCF <- Recommender(train_binary_demo, "UBCF")
+model_binary_UBCF=getModel(modelbinaryUBCF)
+train_binary_demo_mt=as(train_binary_demo, "matrix")
+
+```
+```{r, echo=FALSE}
+x=as(simil(binary_demo_mt,method="jaccard"), "matrix")
+rownames(x)=colnames(x) 
+kable(x, caption = "User based similiraty matrix using jaccard index and binary data.") %>%
+ kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F)
+
+```
+
+As one can observe, the two most similar users to Scott Weinberg are Michael Dequina and Dustin Putman. Hence, one can infer the movies to be recommended from the evaluation of the score values of each movie seen by Dustin and Michael but not by Scott. 
+```{r , include=FALSE}
+
+binary_demo_mt_subset=subset(binary_demo_mt, rownames(binary_demo_mt) %in% c("Dustin Putman", "Michael Dequina", "Scott Weinberg"))
+binary_demo_mt_subset=as.data.frame(binary_demo_mt_subset)  
+kable(binary_demo_mt_subset, caption = "Binary data for the two most similar users to Scot") %>%
+kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F)
+```
+
+The value of score for a given movie i can be calculated by the sum of the similarity between the target user and its neighbors times 1 or 0, weather the neighbor have seen the movie i or not, divided by the number of neighbors considered. That is to say, the score is influenced by the similarity between the user and its targets and also by the number of neighbors that has in fact watched the movies. Therefore, the top 3 movies to be recommended are the ones represented by the id 564, since it has been watched by both closest neighbors, 433, since Michael is the neighbor with higher similarity, and finally 418, although it has the same score as movies 488, 610 and 611.
+
+
+```{r, include=FALSE}
+
+pred=predict(modelbinaryUBCF, test_binary_demo, n=3)
+getList(pred)
+
+rm(modelbinaryUBCF)
+rm(model_binary_UBCF)
+rm(pred)
+```
+For the IBCF model using binary data the following similarity matrix was obtained when jaccard index was applied as similarity measure (Table 5). 
+```{r binary IBCF , echo=FALSE}
+modelbinaryIBCF <- Recommender(train_binary_demo, "IBCF", parameter=list(c(nn=2)))
+model_binary_IBCF=getModel(modelbinaryIBCF)
+train_binary_demo_mt=as(train_binary_demo, "matrix")
+```
+```{r, echo=FALSE}
+x=as(simil(binary_demo_mt,method="jaccard", by_rows = F), "matrix") 
+rownames(x)=colnames(x)
+kable(x, caption = "Item bases similarity matrix using jaccard index and binary data.") %>%
+kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F)
+
+```
+In this case, we have to take into account that Scott watched the movies indexed by 443 and 458. The 3 most similar films to these two are the movies represented by the ids 564, 418 and 610, which correspond to the ones to be recommended.
+```{r include=FALSE}
+
+pred=predict(modelbinaryIBCF, test_binary_demo, type="ratings")  
+getList(pred)
+
+pred=predict(modelbinaryIBCF, test_binary_demo, n=3)
+getList(pred)
+
+rm(modelbinaryIBCF)
+rm(model_binary_IBCF)
+rm(pred)
+
+```
+For the UBCF model using non binary data the following similarity matrix was obtained when cosine similarity was applied (Table 6).
+
+```{r non binary UBCF , echo=FALSE}
+
+modelnonbinaryUBCF <- Recommender(train_nonbinary_demo, "UBCF", parameter=list(c(nn=2)))
+model=getModel(modelnonbinaryUBCF)
+train_nonbinary_demo_mt=as(train_nonbinary_demo, "matrix")
+
+```
+```{r, echo=FALSE}
+x=as(simil(n_binary_demo_mt,method="cosine"), "matrix")
+x=as.data.frame(x) 
+kable(x, caption = "User based similarity matrix using cosine similarity and non-binary data.") %>%
+kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F)
+```
+
+The two most similar users to Scott obtained by this method are Emanuel and Michael. We used the weighted method to estimate the ratings given by Scott to each film based on his closest neighbor's ratings. 
+
+```{r, include=FALSE}
+n_binary_demo_mt_subset=subset(n_binary_demo_mt, rownames(n_binary_demo_mt) %in% c("Emanuel Levy", "Michael Dequina", "Scott Weinberg"))
+
+n_binary_demo_mt_subset=as.data.frame(n_binary_demo_mt_subset)  
+kable(n_binary_demo_mt_subset, caption = "Non binary data for the two most similar users to Scott") %>%
+kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F)
+
+```
+
+
+The predicted ratings can be consulted below.
+
+
+```{r, echo=FALSE}
+
+pred=predict(modelnonbinaryUBCF, test_nonbinary_demo, type="ratings")
+getList(pred)
+
+```
+Based on the obtained ratings, we can infer that the top 3 movies to be recommended are the ones indexed by 528, 611 and 582 since they exhibit the highest values. 
+```{r include=FALSE}
+pred=predict(modelnonbinaryUBCF, test_nonbinary_demo, n=3) 
+getList(pred)
+
+rm(modelnonbinaryUBCF)
+rm(pred)
+
+```
+Similarly, for the IBCF model using non binary data the following similarity matrix was obtained when jaccard index cosine similarity was applied. 
+
+```{r, non binary IBCF , echo=FALSE}
+
+modelnonbinaryIBCF <- Recommender(train_nonbinary_demo, "IBCF", parameter=list(c(nn=2)))
+model_nonbinary_IBCF=getModel(modelnonbinaryIBCF)
+train_nonbinary_demo_mt=as(train_nonbinary_demo, "matrix")
+
+```
+```{r, echo=FALSE}
+
+x=as(simil(train_binary_demo_mt,method="cosine", by_rows = F), "matrix")
+x=as.data.frame(x) 
+kable(x, caption = "Item based similarity matrix using cosine-similarity and non-binary data") %>%
+kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F)
+
+```
+
+As previously performed, each film rating was esteemed by the weighted method, based on the respective similarity score to the movies previously viewed, and are available below. Accordingly, the top 3 movies for recommendation are 610, 564 and 433.
+```{r, echo=FALSE}
+
+
+pred=predict(modelnonbinaryIBCF, test_nonbinary_demo, type="ratings") 
+getList(pred)
+
+```
+```{r include=FALSE}
+pred=predict(modelnonbinaryIBCF, test_nonbinary_demo, n=3)
+getList(pred)
+
+rm(modelnonbinaryIBCF)
+rm(model_nonbinary_IBCF)
+rm(pred)
+
+```
+In conclusion, different results are obtained when different methods are applied, varying also weather binary or non-binary data is used. Such outcome is not surprising attending that, as described above, each method has a very specific and unique procedure to estimate the best recommendations to a certain user. 
+
+Nowadays, collaborative filtering is considered to be the most popular and widely implemented technique in recommender systems. Another approach that is becoming very popular is the use of hybrid systems which result from the combination of different techniques, taking benefit from their advantages and minimizing their limitations. For instance, collaborative filtering method  suffers from new-user problems since they do not have information available to make the recommendation. This does not limit content-bases approaches since recommendations are based on item’s description.
+
+
+
+
+
+
+## Experimental setup and obtained results
+
+We start our experimental setup by selecting only a smaller set of critics and movies in order to have a smaller number of observations. This is necessary in order to reduce the size of our data and facilitate further analysis. We selected only the critics with at least 14 reviews, which was the mean value of reviews per critic, and movies with at least 32 reviews, which was the mean number of reviews per movie. This means our _data_ set has only the movies and critics with most interactions.
+
+
+```{r, echo=FALSE}
+
+#summary(revbycritic)
+#mean value of reviews per critic, 14
+ucritics <- revbycritic[revbycritic$Nr_of_reviews >= 14,]
+ucritics <- as.list(ucritics$critic)
+#summary(revbyid)
+#meanvalue of nr of reviews per movie, 32
+umovies <- revbyid[revbyid$Nr_of_reviews >= 32,]
+umovies <- as.list(umovies$id)
+
+data <- dplyr::select(reviews, critic, id)
+data <- data[data$critic %in% ucritics,]
+data <- data[data$id %in% umovies,]
+```
+
+
+### Binary Data
+
+We started by analyzing models constructed using binary information. Here, only the critic and the movie id are passed on to the matrix, which will contain information on whether or not a given critic has seen a particular movie. The previously described _data_ set is first coerced into a binary rating matrix.
+
+```{r binary matrix setup, include=FALSE}
+binary <- as.data.frame(data)
+binary <- na.omit(binary)
+mb <- as(binary, "binaryRatingMatrix")  
+
+#getRatingMatrix(mb)
+```
+The heat-maps on figure 13 allows us to see that our data isn't very sparse. In fact, if we check the top critics, we can see that most of them have seen most of the top movies.  
+```{r, echo=FALSE, fig.align="center", fig.cap="Heatmaps representing binary data considering which movies did each critic sa0."}
+min_movies <- quantile(rowCounts(mb), 0.98)
+min_raters <- quantile(colCounts(mb), 0.975)
+
+
+hm1 <- image(mb, main = "Binary rating matrix", xlab = "Movies", ylab = "Critics", sub=" ")
+
+hm2 <- image(mb[rowCounts(mb) > min_movies, colCounts(mb) > min_raters], main = "Top critics and movies", xlab = "Movies", ylab = "Critics", sub=" ")
+
+grid.arrange(plots = hm1,hm2,
+  layout_matrix = rbind(c(1,2)
+))
+
+```
+In order to evaluate the different recommender algorithms, it is necessary to have a training set and a testing set. To obtain this sets from our data, we followed the protocol described in the _recommenderlab_ package documentation. We used the split method, which randomly assigns a proportion to the test set and to the training set. We set this proportion at 80% train, and 20% test. 
+The split method also generates a unknown and known sets, which are used for the evaluation of the resulting models. The unknown set represents a set where items are withheld from the profile of a given user, and the evaluation is based on how well the predicted results match the withheld value, which is saved in the known set.
+
+```{r binary data set set up, include=FALSE}
+set.seed(500)
+binary_split <- evaluationScheme(mb, method = "split", train = 0.8, given = 1)
+
+train_binary <- getData(binary_split,"train")
+binary_known <- getData(binary_split,"known")
+binary_unknown <- getData(binary_split,"unknown")
+rm(binary_split)
+```
+
+Our goal is to compare different recommender systems, but each method has different parameters that can greatly influence their performance.In order to get the best comparison possible, we started by evaluating the performance of each method under different parameters. The set of parameters that presented the best results was used for the final comparison.
+The evaluation method selected was 10-fold cross-validation, with all but one evaluation, this means the algorithm is given only one randomly chosen item for the test user, and it is evaluated by how well it is able to predict the withheld item. This is measured by precision (quality of each recommendation) and recall (ratio of relevant items guessed). This scheme was applied for the top 1, 2 and 5 recommendations.
+
+```{r UBCF methods, include=FALSE}
+set.seed(500)
+binary_evals <- evaluationScheme(train_binary, method = "cross-validation", k = 10, given = 1) 
+
+UBCF_methods <- list(`Standard UBCF` = list(name = "UBCF", param = NULL),
+                `Cosine UBCF` = list(name = "UBCF", param = c(method = "cosine")),
+                `Unweighted UBCF` = list(name = "UBCF", param = c(weighted = FALSE)),
+                `nn 5 UBCF` = list(name = "UBCF", param = c(nn = 5)),
+                `nn 50 UBCF` = list(name = "UBCF", param = c(nn = 50)))  
+
+UBCF_methods_results <- evaluate(binary_evals, UBCF_methods, type = "topNList", n = c(1, 2, 5))                                                             
+
+```
+
+For UBCF method, five different sets of parameters were tested:
+
+  1. **_Standard UBCF_**: according to the _recommender_ package _registry_, the UBCF parameters as default are Jaccard similarity method, nearest neighbors (nn) as 25, weighted as true, and sample as false.
+  2. **_Cosine UBCF_**: here we changed the similarity method from jaccard to cosine.
+  3. **_Unweighted UBCF_**: here we set weighted as false.
+  4. **_nn 5 UBCF_**: here the nn was set as 5, one fifth of the default value.
+  5. **_nn 50 UBCF_**: here the nn was set as 50, twice the default value.
+
+The results in figure 14 show that UBCF with nn = 5 has the worse results, and that the remaining sets of parameters seem to have similar performances. However, the nn = 50 has slightly better results , and thus this set of parameters was selected as the best UBCF.
+
+```{r, echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of UBCF models under five different sets of parameters, for top 1,2 and 5 recommendation ", fig.width=5, fig.height=5}
+#avg(binary_eval_results) 
+recommenderlab::plot(UBCF_methods_results,"prec/rec")
+rm(UBCF_methods)
+rm(UBCF_methods_results)
+
+```
+
+```{r IBCF methods, include=FALSE}
+set.seed(500)
+IBCF_methods <- list(`Standard IBCF` = list(name = "IBCF", param = NULL),
+                `Cosine IBCF` = list(name = "IBCF", param = c(method = "cosine")),
+                `normalized IBCF` = list(name = "IBCF", param = c(normalize_sim_matrix = TRUE)),
+                `alpha 0.25 IBCF` = list(name = "IBCF", param = c(alpha = 0.25)),
+                `alpha 1 IBCF` = list(name = "IBCF", param = c(alpha = 1)),
+                `k 10 IBCF` = list(name = "IBCF", param = c(k = 10)),
+                `k 60 IBCF` = list(name = "IBCF", param = c(k = 60)))  
+
+IBCF_methods_results <- evaluate(binary_evals, IBCF_methods, type = "topNList", n = c(1, 2, 5))                                                                       
+
+```
+
+
+For IBCF method, seven different sets of parameters were tested:
+
+  1. **_Standard IBCF_**: according to the _recommender_ package _registry_, the IBCF parameters as default are Jaccard similarity method, nearest neighbors (k) as 30, the similarity matrix normalization is set as false, and alpha is set as 0.5.
+  2. **_Cosine IBCF_**: here we changed the similarity method from jaccard to cosine.
+  3. **_normalized IBCF_**: here we set we set similarity matrix normalization as true.
+  4. **_alpha 0.25 IBCF_**: here the alpha value was set to 0.25, half the default value.
+  5. **_alpha 1 IBCF_**: here the alpha value was set to 1, twice the default value.
+  6. **_k 10 IBCF_**: here the k was set as 10, one third of the default value.
+  7. **_k 60 IBCF_**: here the k was set as 60, twice the default value.
+
+The results in figure 15 show that similarly to what occurred in UBCF, the best performing sets have very similar values. Yet from here, we decided to select cosine similarity as the best set of parameters.
+
+
+
+
+```{r, echo=FALSE, fig.cap="Precision and recall results for the evaluation of IBCF models under seven different sets of parameters, for top 1,2 and 5 recommendation ", fig.align="center", fig.width=5, fig.height=5}
+
+#avg(binary_eval_results) 
+recommenderlab::plot(IBCF_methods_results,"prec/rec")
+rm(IBCF_methods)
+rm(IBCF_methods_results)
+```
+
+```{r AR methods evaluation, include=FALSE}
+set.seed(500) 
+
+AR_methods <- list(#`AR Standard` = list(name = "AR",param = NULL),
+                    `AR c0.1/s0.1` = list(name = "AR",param = list(confidence = 0.1, sup = 0.1)),
+                    `AR c0.5/s0.1` = list(name = "AR",param = list(confidence = 0.5, sup = 0.1)),
+                    `AR c0.1/s0.05` = list(name = "AR",param = list(confidence = 0.1, sup = 0.05)),
+                    `AR c0.1/s0.025` = list(name = "AR",param = list(confidence = 0.1, sup = 0.025)),
+                    `AR c0.5/s0.05` = list(name = "AR",param = list(confidence = 0.5, sup = 0.05)))
+                 
+
+AR_methods_results <- evaluate(binary_evals, AR_methods, type = "topNList", n = c(1, 2, 5))                                                                       
+
+```
+For AR method, five different sets of parameters were tested. Unlike for other methods, for the standard AR method which according to the _recommender_ package _registry_ as the default values of confidence and support as respectively 0.8 and 0.1, _calcPredictionAccuracy_ is not able to calculate the precision value. As so, this set of parameters was not used in this evaluation.
+
+  1. **_AR c0.1/s0.1_**: with default support and confidence set as 0.1.
+  2. **_AR c0.5/s0.1_**: with default support and confidence set as 0.5.
+  3. **_AR c0.1/s0.05_**: with default confidence and support set as 0.05.
+  4. **_AR c0.1/s0.025_**: with default confidence and support set as 0.025.
+  5. **_AR c0.5/s0.05_**: with confidence at 0.5 and support set as 0.05.
+
+The results in figure 16 show that support is the determining factor, while no changes are observed for the same support but with different confidence levels. As such, we selected the confidence 0.5 and support 0.05 as the best set of parameters. We chose confidence 0.5 over 0.1 because they present the same results, but with confidence 0.5 we have less rules, and thus it is more efficient. We choose this one over the support 0.1 because it has a more stable performance.
+
+```{r, echo=FALSE, fig.cap="Precision and recall results for the evaluation of AR models under five different sets of parameters, for top 1,2 and 5 recommendation " , fig.align="center", fig.width=5, fig.height=5}
+#avg(AR_methods_results) 
+
+recommenderlab::plot(AR_methods_results,"prec/rec")
+rm(AR_methods)
+rm(AR_methods_results)
+```
+
+The Popular method does not have any available parameters, thus this first step of evaluation was not performed.
+
+```{r binary evaluation, include=FALSE}
+set.seed(500)
+binary_methods <- list(popular = list(name = "POPULAR", param = NULL),
+                UBCF= list(name = "UBCF", param = c(nn=50)),
+                AR = list(name = "AR",param = list(confidence = 0.5, sup = 0.1)),
+                IBCF = list(name = "IBCF", param = c(method = "cosine")))  
+
+binary_eval_results <- evaluate(binary_evals, binary_methods, type = "topNList", n = c(1, 2, 5))                                                                       
+
+```
+With the previously determined best set of parameters, each method was once again evaluated, but this time against each other.
+The results in figure 17 show that UBCF has the best performance for our data set.
+
+
+```{r, echo=FALSE, fig.cap="Precision and recall results for the evaluation of all tested methods under their best performing set of parameters, for top 1,2 and 5 recommendation.", fig.align="center", fig.width=5, fig.height=5}
+#avg(binary_eval_results)
+recommenderlab::plot(binary_eval_results, "prec/rec") 
+rm(binary_eval_results)
+rm(binary_evals)
+rm(binary_methods)
+```
+In order to validate the results obtained above, manual evaluation was also performed. We started by constructing models with the _Recommender_ function, with the previously selected parameters and the training set obtained from the split method.
+Then, predictions were obtained using the _predict_ function, with the constructed models and the know set obtained in the split method. This was repeated for top 1, 2 and 5 recommendations.The results on figure 18 are in agreement with the ones above.
+
+```{r binary models, include=FALSE}
+modelPOP <- Recommender(train_binary, "POPULAR")
+modelUBCF <- Recommender(train_binary, "UBCF",param = c(nn = 50))
+modelAR <- Recommender(train_binary, "AR", param = list(confidence = 0.5, sup = 0.1))
+modelIBCF <- Recommender(train_binary, "IBCF",param = c(method = "cosine"))
+```
+
+```{r, binary POP eval for top1-5, echo=FALSE}
+POPpreds1 <- predict(modelPOP, binary_known, n = 1) 
+POPpreds2 <- predict(modelPOP, binary_known, n = 2)
+POPpreds5 <- predict(modelPOP, binary_known, n = 5)
+
+error <- rbind(POPpreds1 = calcPredictionAccuracy(POPpreds1, binary_unknown, given = 1),
+               POPpreds2 = calcPredictionAccuracy(POPpreds2, binary_unknown, given = 1),
+               POPpreds5 = calcPredictionAccuracy(POPpreds5, binary_unknown, given = 1))
+
+
+df_error <- as.data.frame(error)
+df_error <- dplyr::select(df_error, recall, precision)
+df_error <- rownames_to_column(df_error)
+
+rm(POPpreds1)
+rm(POPpreds2)
+rm(POPpreds5)
+```
+
+```{r, binary UBCF eval for top1-5, echo=FALSE}
+UBCFpreds1 <- predict(modelUBCF, binary_known, n = 1) 
+UBCFpreds2 <- predict(modelUBCF, binary_known, n = 2)
+UBCFpreds5 <- predict(modelUBCF, binary_known, n = 5)
+
+
+error <- rbind(UBCFpreds1 = calcPredictionAccuracy(UBCFpreds1, binary_unknown, given = 1),
+               UBCFpreds2 = calcPredictionAccuracy(UBCFpreds2, binary_unknown, given = 1),
+               UBCFpreds5 = calcPredictionAccuracy(UBCFpreds5, binary_unknown, given = 1))
+
+error <- as.data.frame(error)
+error <- dplyr::select(error, recall, precision)
+error <- rownames_to_column(error)
+df_error <- dplyr::bind_rows(df_error,error)
+
+
+
+
+rm(UBCFpreds1)
+rm(UBCFpreds2)
+rm(UBCFpreds5)
+```
+
+```{r, binary AR eval for top1-5, echo=FALSE}
+ARpreds1 <- predict(modelAR, binary_known, n = 1)
+ARpreds2 <- predict(modelAR, binary_known, n = 2)
+ARpreds5 <- predict(modelAR, binary_known, n = 5)
+
+error <- rbind(ARpreds1 = calcPredictionAccuracy(ARpreds1, binary_unknown, given = 1),
+               ARpreds2 = calcPredictionAccuracy(ARpreds2, binary_unknown, given = 1),
+               ARpreds5 = calcPredictionAccuracy(ARpreds5, binary_unknown, given = 1))
+
+error <- as.data.frame(error)
+error <- dplyr::select(error, recall, precision)
+error <- rownames_to_column(error)
+df_error <- dplyr::bind_rows(df_error,error)
+
+
+rm(ARpreds1)
+rm(ARpreds2)
+rm(ARpreds5)
+```
+
+```{r, echo=FALSE, fig.cap="Precision and recall results for the evaluation of all tested methods under their best performing set of parameters for top 1,2 and 5 recommendation.", fig.align="center"}
+IBCFpreds1 <- predict(modelIBCF, binary_known, n = 1)
+IBCFpreds2 <- predict(modelIBCF, binary_known, n = 2)
+IBCFpreds5 <- predict(modelIBCF, binary_known, n = 5)
+
+
+error <- rbind(IBCFpreds1 = calcPredictionAccuracy(IBCFpreds1, binary_unknown, given = 1),
+               IBCFpreds2 = calcPredictionAccuracy(IBCFpreds2, binary_unknown, given = 1),
+               IBCFpreds5 = calcPredictionAccuracy(IBCFpreds5, binary_unknown, given = 1))
+
+error <- as.data.frame(error)
+error <- dplyr::select(error, recall, precision)
+error <- rownames_to_column(error)
+df_error <- dplyr::bind_rows(df_error,error)
+
+ggplot() + geom_point(data = df_error[1:3,], aes( x = recall, y = precision, colour = "Popular"), alpha = 1, width = 0.01, height = 0.01) + geom_line(colour = "blue",data = df_error[1:3,], aes( x = recall, y = precision))  +
+  geom_point(data = df_error[4:6,], aes( x = recall, y = precision, colour = "UBCF"), alpha = 1, width = 0.01, height = 0.01) + geom_line(data = df_error[4:6,], aes( x = recall, y = precision), colour = "green") + 
+  geom_point(data = df_error[7:9,], aes( x = recall, y = precision, colour = "AR"), alpha = 1, width = 0.01, height = 0.01) + geom_line(data = df_error[7:9,], aes( x = recall, y = precision), colour = "orange") + 
+  geom_point(data = df_error[10:12,], aes( x = recall, y = precision, colour = "IBCF"), alpha = 1, width = 0.01, height = 0.01) + geom_line(data = df_error[10:12,], aes( x = recall, y = precision), colour = "red") + scale_colour_manual(name = 'Method', 
+         values =c('Popular'='blue','UBCF'='green','AR'='orange','IBCF'='red'))
+
+rm(IBCFpreds1)
+rm(IBCFpreds2)
+rm(IBCFpreds5)
+```
+
+
+
+### Non-binary
+
+#### Rating
+
+For non-binary data, we also select only a smaller set of critics and movies as described above. The difference with in this non-binary approach is that besides the critic and the movie id, the ratings provided by the critics are also passed on to the matrix, which in this case is a real rating matrix. This will provide not only information on whether or not a critic has seen a given movie, but also how much he enjoyed it by the rating he provided. The split method was once again used to randomly assign a proportion to the test set and to the training set, and also generate a unknown and known sets.
+
+```{r Non-binary matrix set up, include=FALSE}
+nbdata <- dplyr::select(reviews, critic, id, rating)
+nbdata <- nbdata[nbdata$critic %in% ucritics,]
+nbdata <- nbdata[nbdata$id %in% umovies,]
+nbdata <- na.omit(nbdata)
+mnb <- as(nbdata, "realRatingMatrix")  
+```
+To assess whether or not it is necessary to normalize our rating data, we constructed the heat-maps on figure 19. Normalization is important because users which have all their ratings either too high or too low might induce bias. The heat-maps represent the real rating matrix for the top critics and movies, with real ratings, and normalized. We can see that there aren't any particular rows (critics) or columns (movies) that are too dark, or two light, thus normalization doesn't seem to be necessary for our data. 
+
+
+```{r, echo=FALSE, fig.height=4, fig.width=7, fig.align="center", fig.cap="Standard and normalized heatmaps for top movies and critics in non-binary rating matrix"}
+
+
+min_movies <- quantile(rowCounts(mnb), 0.98)
+min_raters <- quantile(colCounts(mnb), 0.975)
+
+hm1 <- image(mnb[rowCounts(mnb) > min_movies, colCounts(mnb) > min_raters], main = "Top critics and movies", xlab = "Movies", ylab = "Critics", sub=" ")
+
+normalized <- recommenderlab::normalize(mnb)
+
+min_movies_n <- quantile(rowCounts(normalized), 0.98)
+min_raters_n <- quantile(colCounts(normalized), 0.975)
+
+hm2 <- image(normalized[rowCounts(normalized) > min_movies_n,colCounts(normalized) > min_raters_n], main = "Normalized ratings", xlab = "Movies", ylab = "Critics", sub=" ")
+
+grid.arrange(plots = hm1,hm2,
+  layout_matrix = rbind(c(1,2)
+))
+
+```
+
+
+```{r Non-binary data set up, include=FALSE}
+set.seed(500)
+nonbinary_split <- evaluationScheme(mnb, method = "split", train = 0.8, given = 1)
+
+train_nonbinary <- getData(nonbinary_split,"train")
+nonbinary_known <- getData(nonbinary_split,"known")
+nonbinary_unknown <- getData(nonbinary_split,"unknown")
+rm(nonbinary_split)
+```
+
+We started again by evaluating the performance of each method under different parameters and selecting set of parameters that presented the best results.
+The evaluation method is similar but with a difference. In this case, instead of giving a top-x recommendation, the goal is to predict the rating a given user would give to a specific item. So in the case, the evaluation is based on three error measures: root-mean-square error (RMSE), mean squared error (MSE) and mean absolute error (MAE).
+
+
+```{r non binary UBCF methods, include=FALSE}
+set.seed(500)
+nonbinary_evals <- evaluationScheme(train_nonbinary, method = "cross-validation", k = 10, given = 1, goodRating = 3)
+
+UBCF_methods <- list(`Standard UBCF` = list(name = "UBCF", param = NULL),
+                `Jaccard UBCF` = list(name = "UBCF", param = c(method = "jaccard")),
+                `Z-score UBCF` = list(name = "UBCF", param = c(normalize= "z-score")),
+                `nn 5 UBCF` = list(name = "UBCF", param = c(nn = 5)),
+                `nn 50 UBCF` = list(name = "UBCF", param = c(nn = 50)))  
+
+UBCF_methods_results <- evaluate(nonbinary_evals, UBCF_methods, type = "ratings")                                                       
+
+```
+For UBCF method, five different sets of parameters were tested:
+
+  1. **_Standard UBCF_**: according to the _recommender_ package _registry_, the UBCF parameters as default are Cosine similarity method, nearest neighbors (nn) as 25, normalize as "center", and sample as false.
+  2. **_Jaccard UBCF_**: here we changed the similarity method from cosine to jaccard.
+  3. **Z-score UBCF_**: here we set normalization with z-score.
+  4. **_nn 5 UBCF_**: here the nn was set as 5, one fifth of the default value.
+  5. **_nn 50 UBCF_**: here the nn was set as 50, twice the default value.
+  
+The results on figure 20 show all three sets have very similar error values, thus the standard protocol was selected.
+
+  
+```{r, echo=FALSE, fig.align="center", fig.cap="RMSE, MSE and MAE errors results for the evaluation of UBCF models under five different sets of parameters, for top 1,2 and 5 recommendation "}
+#avg(binary_eval_results) 
+recommenderlab::plot(UBCF_methods_results)
+rm(UBCF_methods)
+rm(UBCF_methods_results)
+```
+
+```{r non binary IBCF methods, include=FALSE}
+set.seed(500)
+
+IBCF_methods <- list(`standard IBCF` = list(name = "IBCF", param =list(method = "cosine", k = 30, normalize = NULL)),
+                     `jaccard IBCF` = list(name = "IBCF", param = list(method = 'jaccard', k = 30, normalize = NULL)),
+                     `alpha 0.25 IBCF` = list(name = "IBCF", param =list( alpha = 0.25, normalize = NULL)),
+                     `alpha 1 IBCF` = list(name = "IBCF", param =list( alpha = 1, normalize = NULL)),
+                     `k10 IBCF` = list(name = "IBCF", param = list(k = 10, normalize = NULL)),
+                     `k60 IBCF` = list(name = "IBCF", param = list(k = 60, normalize = NULL)))  
+
+ 
+IBCF_methods_results <- evaluate(nonbinary_evals, IBCF_methods, type = "ratings")                                                       
+
+```
+For IBCF method, four different sets of parameters were tested:
+
+  1. **_Standard IBCF_**: according to the _recommender_ package _registry_, the IBCF parameters as default are Cosine similarity method, nearest neighbors (k) as 30, the similarity matrix normalization is set as center, and alpha is set as 0.5.
+  2. **_Jaccard IBCF_**: here we changed the similarity method from cosine to jaccard.
+  3. **_alpha 0.25 IBCF_**: here the alpha value was set to 0.25, half the default value.
+  4. **_alpha 1 IBCF_**: here the alpha value was set to 1, twice the default value.
+  5. **_k 10 IBCF_**: here the k was set as 10, one third of the default value.
+  6. **_k 60 IBCF_**: here the k was set as 60, twice the default value.
+
+The results on figure 21 show that k = 10 has the lowest error on all but MSE, where k = 60 is slightly lower. Nevertheless, k = 10 was selected for further analysis.
+
+```{r, echo=FALSE, fig.align="center", fig.cap="RMSE,  MSE and MAE errors results for the evaluation of IBCF models under five different sets of parameters"}
+recommenderlab::plot(IBCF_methods_results)
+rm(IBCF_methods)
+rm(IBCF_methods_results)
+
+```
+
+```{r non binary POP methods, include=FALSE}
+set.seed(500)
+
+POP_methods <- list(`standard POP` = list(name = "POPULAR", param = NULL),
+                    `z-score POP` = list(name = "POPULAR", param = list(normalize = "z-score")))  
+
+ 
+POP_methods_results <- evaluate(nonbinary_evals, POP_methods, type = "ratings")                                                       
+
+```
+
+For POP method, unlike for the binary setup, two different sets of parameters were tested:
+
+  1. **_Standard IBCF_**: according to the _recommender_ package _registry_, the Popular parameters as default normalize is set as center.
+  2. **_Z-score IBCF_**: here we changed the normalize parameter from center to z-score.
+  
+The results in figure 22 show that both have equal values of all error measures, and as such, the standard set was chosen for further analysis.
+```{r, echo=FALSE, fig.align="center", fig.cap="RMSE,  MSE and MAE errors results for the evaluation of POP models under two different normalization conditions"}
+recommenderlab::plot(POP_methods_results) 
+rm(POP_methods)
+rm(POP_methods_results)
+
+```
+Since AR doesn't allow the input of ratings, this method is not used for non-binary data.The comparison of the remaining models is shown on figure 23 where we can observe that IBCF method presents the lowest values of error.
+
+```{r include=FALSE}
+set.seed(500)
+nonbinary_methods <- list(popular = list(name = "POPULAR", param = NULL), 
+                UBCF= list(name = "UBCF", param = NULL),
+                IBCF = list(name = "IBCF", param=list( k = 10, normalize = NULL))) 
+
+nb_eval_results <- evaluate(nonbinary_evals, nonbinary_methods, type = "ratings")
+
+
+```
+To validate the obtained results, a manual analysis through **calcPredictionAccuracy** was performed. As figure 24 shows, the results are consistent, being the IBCF method the one that exhibits the lowest values of error, with a slight exception for MAE values. 
+
+```{r, echo=FALSE, fig.cap="Validation of the RMSE, MSE and MAE errors results for the evaluation of all tested methods under their best performing set of parameters using **calcPredictionAccuracy** method", fig.align="center"}
+#avg(nb_eval_results)
+recommenderlab::plot(nb_eval_results)
+rm(nb_eval_results)
+```
+
+```{r Non-binarymodels, include=FALSE}
+
+modelPOP <- Recommender(train_nonbinary, "POPULAR")
+modelUBCF <- Recommender(train_nonbinary, "UBCF")
+modelIBCF <- Recommender(train_nonbinary, "IBCF",param = list(k = 10, normalize = NULL))
+
+```
+
+```{r, Non-binary POP eval, echo=FALSE}
+
+POPpreds <- predict(modelPOP, nonbinary_known, type = "ratings") 
+
+
+Popular <- calcPredictionAccuracy(POPpreds, nonbinary_unknown, given = 1, goodRating = 3)
+
+df_error <- as.data.frame(Popular) 
+df_error <- rename(df_error, "value" = "Popular")
+df_error <- df_error %>% rownames_to_column('error')
+df_error <- mutate(df_error, 'Method' = c('Popular'))
+
+rm(POPpreds)
+
+```
+
+```{r, Non-binary UBCF eval, echo=FALSE}
+
+UBCFpreds <- predict(modelUBCF, nonbinary_known, type = "ratings") 
+
+
+UBCF <- calcPredictionAccuracy(UBCFpreds, nonbinary_unknown, given = 1, goodRating = 3)
+UBCF <- as.data.frame(UBCF)
+UBCF <- UBCF %>% rownames_to_column('error')
+UBCF <- rename(UBCF, "value" = "UBCF")
+UBCF<- mutate(UBCF, 'Method' = c('UBCF'))
+
+
+df_error <- bind_rows(df_error, UBCF)
+
+
+
+
+rm(UBCFpreds)
+
+```
+
+
+```{r, echo=FALSE, fig.cap="RMSE, MSE and MAE errors results for the evaluation of all tested methods under their best performing set of parameters.", fig.align="center"}
+
+IBCFpreds <- predict(modelIBCF, nonbinary_known, type = "ratings")
+
+IBCF <- calcPredictionAccuracy(IBCFpreds, nonbinary_unknown, given = 1, goodRating = 3)
+IBCF <- as.data.frame(IBCF)
+IBCF <- IBCF %>% rownames_to_column('error')
+IBCF <- rename(IBCF, "value" = "IBCF")
+IBCF<- mutate(IBCF, 'Method' = c('IBCF'))
+df_error <- bind_rows(df_error, IBCF)
+df_error <- df_error %>% rownames_to_column('number')
+
+df_error$Method <- factor(df_error$Method, levels = unique(df_error$Method[order(df_error$number)]))
+df_error <- select(df_error, -number)
+
+ggplot(data = df_error, aes(fill = Method, x = error, y = value) ) + geom_bar(position="dodge", stat = "identity") + labs( x = NULL , y = NULL) + scale_fill_grey(start = 0.2, end = 0.8, na.value = "red")
+
+
+rm(IBCFpreds)
+```
+
+
+
+
+#### Top-N 
+
+
+```{r non binary topN UBCF methods, include=FALSE}
+set.seed(500)
+nonbinary_evals <- evaluationScheme(train_nonbinary, method = "cross-validation", k = 10, given = 1, goodRating = 3)
+
+UBCF_methods <- list(`Standard UBCF` = list(name = "UBCF", param = NULL),
+                `Jaccard UBCF` = list(name = "UBCF", param = c(method = "jaccard")),
+                `Z-score UBCF` = list(name = "UBCF", param = c(normalize= "z-score")),
+                `nn 5 UBCF` = list(name = "UBCF", param = c(nn = 5)),
+                `nn 50 UBCF` = list(name = "UBCF", param = c(nn = 50)))  
+
+UBCF_methods_results <- evaluate(nonbinary_evals, UBCF_methods, type = "topNList", n = c(1, 2, 5))                                                       
+
+```
+For UBCF method, five different sets of parameters were tested:
+
+  1. **_Standard UBCF_**: according to the _recommender_ package _registry_, the UBCF parameters as default are Cosine similarity method, nearest neighbors (nn) as 25, normalize as "center", and sample as false.
+  2. **_Jaccard UBCF_**: here we changed the similarity method from cosine to jaccard.
+  3. **_Z-score UBCF_**: here we set normalization with z-score.
+  4. **_nn 5 UBCF_**: here the nn was set as 5, one fifth of the default value.
+  5. **_nn 50 UBCF_**: here the nn was set as 50, twice the default value.
+
+Figure 25 shows that all present the same precision and recall values, with the exception of nn = 50 which has lower values. We selected the standard set for further analysis.
+  
+```{r, echo=FALSE, fig.align="center", fig.height=5, fig.width=5, fig.cap="Precision and recall results for the evaluation of UBCF models under five different sets of parameters, for top 1,2 and 5 recommendation "}
+#avg(binary_eval_results) 
+recommenderlab::plot(UBCF_methods_results, "prec/rec")
+rm(UBCF_methods)
+rm(UBCF_methods_results)
+```
+
+
+```{r top1-5 non binary IBCF methods, include=FALSE}
+set.seed(500)
+
+IBCF_methods <- list(`standard IBCF` = list(name = "IBCF", param =list(method = "cosine", k = 30, normalize = NULL)),
+                     `jaccard IBCF` = list(name = "IBCF", param = list(method = 'jaccard', k = 30, normalize = NULL)),
+                     `alpha 0.25 IBCF` = list(name = "IBCF", param =list( alpha = 0.25, normalize = NULL)),
+                     `alpha 1 IBCF` = list(name = "IBCF", param =list( alpha = 1, normalize = NULL)),
+                     `k10 IBCF` = list(name = "IBCF", param = list(k = 10, normalize = NULL)),
+                     `k60 IBCF` = list(name = "IBCF", param = list(k = 60, normalize = NULL)))  
+
+ 
+IBCF_methods_results <- evaluate(nonbinary_evals, IBCF_methods, type = "topNList", n = c(1, 2, 5))                                                       
+
+```
+For IBCF method, four different sets of parameters were tested:
+
+  1. **_Standard IBCF_**: according to the _recommender_ package _registry_, the IBCF parameters as default are Cosine similarity method, nearest neighbors (k) as 30, the similarity matrix normalization is set as center, and alpha is set as 0.5.
+  2. **_Jaccard IBCF_**: here we changed the similarity method from cosine to jaccard.
+  3. **_alpha 0.25 IBCF_**: here the alpha value was set to 0.25, half the default value.
+  4. **_alpha 1 IBCF_**: here the alpha value was set to 1, twice the default value.
+  5. **_k 10 IBCF_**: here the k was set as 10, one third of the default value.
+  6. **_k 60 IBCF_**: here the k was set as 60, twice the default value.
+
+The results on figure 26 show that the best performance is with k = 60.
+```{r, echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of IBCF models under six different sets of parameters, for top 1,2 and 5 recommendation", fig.height=5, fig.width=5}
+recommenderlab::plot(IBCF_methods_results,"prec/rec")
+rm(IBCF_methods)
+rm(IBCF_methods_results)
+
+```
+
+```{r top1-5 non binary POP methods, include=FALSE}
+set.seed(500)
+
+POP_methods <- list(`standard POP` = list(name = "POPULAR", param = NULL),
+                    `z-score POP` = list(name = "POPULAR", param = list(normalize = "z-score")))  
+
+ 
+POP_methods_results <- evaluate(nonbinary_evals, POP_methods, type = "topNList", n = c(1, 2, 5))                                                       
+
+```
+
+For POP method, unlike for the binary setup, two different sets of parameters were tested:
+
+  1. **_Standard IBCF_**: according to the _recommender_ package _registry_, the Popular parameters as default normalize is set as center.
+  2. **_Z-score IBCF_**: here we changed the normalize parameter from center to z-score.
+
+Results on figure 27 show that standard protocol has a slightly better performance.
+
+```{r, echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of Popular models under two different sets of parameters, for top 1,2 and 5 recommendation ", fig.height=5, fig.width=5}
+recommenderlab::plot(POP_methods_results, "prec/rec") 
+rm(POP_methods)
+rm(POP_methods_results)
+
+```
+
+```{r include=FALSE}
+set.seed(500)
+nonbinary_methods <- list(popular = list(name = "POPULAR", param = NULL), 
+                UBCF= list(name = "UBCF", param = c(nn = 50)),
+                IBCF = list(name = "IBCF", param=list( k = 60, normalize = NULL))) 
+
+nb_eval_results <- evaluate(nonbinary_evals, nonbinary_methods, type = "topNList", n = c(1, 2, 5))
+
+
+```
+When evaluating the three methods under its best performing techniques, we can see that surprisingly, popular shows the best results (figure 28).
+```{r, echo=FALSE, fig.cap="Precision and recall results for the evaluation of all tested methods under their best performing set of parameters", fig.align="center", fig.height=5, fig.width=5}
+#avg(nb_eval_results)
+recommenderlab::plot(nb_eval_results, "prec/rec")
+rm(nb_eval_results)
+```
+
+```{r, nonbinary POP eval for top1-5, echo=FALSE}
+
+POPpreds1 <- predict(modelPOP, nonbinary_known, n = 1, type = "topNList") 
+POPpreds2 <- predict(modelPOP, nonbinary_known, n = 2, type = "topNList")
+POPpreds5 <- predict(modelPOP, nonbinary_known, n = 5, type = "topNList")
+
+error <- rbind(POPpreds1 = calcPredictionAccuracy(POPpreds1, nonbinary_unknown, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds2 = calcPredictionAccuracy(POPpreds2, nonbinary_unknown, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds5 = calcPredictionAccuracy(POPpreds5, nonbinary_unknown, given = 1, goodRating = 3, type = "topNList"))
+
+
+df_error <- as.data.frame(error)
+df_error <- dplyr::select(df_error, recall, precision)
+df_error <- rownames_to_column(df_error)
+
+rm(POPpreds1)
+rm(POPpreds2)
+rm(POPpreds5)
+```
+
+```{r, nonbinary UBCF eval for top1-5, echo=FALSE}
+
+UBCFpreds1 <- predict(modelUBCF, nonbinary_known, n = 1, type = "topNList") 
+UBCFpreds2 <- predict(modelUBCF, nonbinary_known, n = 2, type = "topNList")
+UBCFpreds5 <- predict(modelUBCF, nonbinary_known, n = 5, type = "topNList")
+
+
+error <- rbind(UBCFpreds1 = calcPredictionAccuracy(UBCFpreds1, nonbinary_unknown, given = 1, goodRating = 3, type = "topNList"),
+               UBCFpreds2 = calcPredictionAccuracy(UBCFpreds2, nonbinary_unknown, given = 1, goodRating = 3, type = "topNList"),
+               UBCFpreds5 = calcPredictionAccuracy(UBCFpreds5, nonbinary_unknown, given = 1, goodRating = 3, type = "topNList"))
+
+error <- as.data.frame(error)
+error <- dplyr::select(error, recall, precision)
+error <- rownames_to_column(error)
+df_error <- dplyr::bind_rows(df_error,error)
+
+
+
+
+rm(UBCFpreds1)
+rm(UBCFpreds2)
+rm(UBCFpreds5)
+```
+Our "manual" analysis through **calcPredictionAccuracy** (figure 29) confirms the results obtained from the k-fold validation.
+
+```{r, echo=FALSE, fig.cap="Validation of precision and recall results for the evaluation of all tested methods under their best performing set of parameters for top 1,2 and 5 recommendation using **calcPredictionAccuracy** method.", fig.align="center"}
+
+IBCFpreds1 <- predict(modelIBCF, nonbinary_known, n = 1, type = "topNList")
+IBCFpreds2 <- predict(modelIBCF, nonbinary_known, n = 2, type = "topNList")
+IBCFpreds5 <- predict(modelIBCF, nonbinary_known, n = 5, type = "topNList")
+
+
+error <- rbind(IBCFpreds1 = calcPredictionAccuracy(IBCFpreds1, nonbinary_unknown, given = 1, goodRating = 3, type = "topNList"),
+               IBCFpreds2 = calcPredictionAccuracy(IBCFpreds2, nonbinary_unknown, given = 1, goodRating = 3, type = "topNList"),
+               IBCFpreds5 = calcPredictionAccuracy(IBCFpreds5, nonbinary_unknown, given = 1, goodRating = 3, type = "topNList"))
+
+error <- as.data.frame(error)
+error <- dplyr::select(error, recall, precision)
+error <- rownames_to_column(error)
+df_error <- dplyr::bind_rows(df_error,error)
+
+ggplot() + geom_point(data = df_error[1:3,], aes( x = recall, y = precision, colour = "Popular"), alpha = 1, width = 0.01, height = 0.01) + geom_line(colour = "blue",data = df_error[1:3,], aes( x = recall, y = precision))  +
+  geom_point(data = df_error[4:6,], aes( x = recall, y = precision, colour = "UBCF"), alpha = 1, width = 0.01, height = 0.01) + geom_line(data = df_error[4:6,], aes( x = recall, y = precision), colour = "green") + 
+  geom_point(data = df_error[7:9,], aes( x = recall, y = precision, colour = "IBCF"), alpha = 1, width = 0.01, height = 0.01) + geom_line(data = df_error[7:9,], aes( x = recall, y = precision), colour = "red") + scale_colour_manual(name = 'Method', 
+         values =c('Popular'='blue','UBCF'='green','IBCF'='red'))
+
+rm(IBCFpreds1)
+rm(IBCFpreds2)
+rm(IBCFpreds5)
+```
+# Task 3 - Context-aware recommendation
+In this stage, the influence of the context on the recommendation models will be investigated. To this end, 4 data sets were analysed and selected taking into account relevant parameters that may have an influence on the recommendation models. Thus, the following were analysed: the comedy genre, films with more than 100 minutes, films considered Parent-guide (PG) and films released after 2010. The models with the best previous results were selected:
+For the binary data set, the UBCF model shows better results, as shown in Figure 17. 
+For the non-binary data set, considering the rating, the IBCF model showed better results, as can be seen in figure 23.
+For the non-binary data set, considering the critical top-n, the Popular model was the best, according to figure 28.
+
+## Movie Genre
+From the exploratory analysis by gender (figure 8), the Romance genre seems to be a good candidate to a good influencer since it is a specific gender, has a reasonable number of films and his ratings are above the average. 
+```{r , movie genre data set preparation, include=FALSE}
+
+rev_mov = merge(reviews, movie_info, by = "id")
+set_genre = rev_mov
+set_genre$Ter_Romance = grepl("Romance", rev_mov$genre)
+set_genre = set_genre[set_genre$Ter_Romance == TRUE,]
+```
+
+```{r, movie genre Binary UBCF, include=FALSE}
+final_genre = dplyr::select(set_genre, critic, id)
+final_genre <- final_genre[final_genre$critic %in% ucritics,]
+final_genre <- final_genre[final_genre$id %in% umovies,]
+
+binary_genre <- as.data.frame(final_genre)
+binary_genre <- na.omit(binary_genre)
+mb_genre <- as(binary_genre, "binaryRatingMatrix")  
+getRatingMatrix(mb_genre)
+
+set.seed(500)
+
+binary_split_genre <- evaluationScheme(mb_genre, method = "split", train = 0.8, given = 1)
+train_binary_genre <- getData(binary_split_genre,"train")
+binary_known_genre <- getData(binary_split_genre,"known")
+binary_unknown_genre <- getData(binary_split_genre,"unknown")
+rm(binary_split_genre)
+
+binary_evals_genre <- evaluationScheme(train_binary_genre, method = "cross-validation", k = 10, given = 1) 
+
+UBCF_methods_genre <- list(`Cosine UBCF` = list(name = "UBCF", param = c(method = "cosine")),
+                           `nn 50 UBCF` = list(name = "UBCF", param = c(nn = 50)))  
+
+UBCF_methods_genre_results <- evaluate(binary_evals_genre, UBCF_methods_genre, type = "topNList", n = c(1, 2, 5))
+
+```
+We start to analyse the binary data with UBCF model. 
+
+For UBCF method, two different sets of parameters were tested:
+
+1. **_Cosine UBCF:_** here we changed the similarity method from jaccard to cosine.
+2. **_nn 50 UBCF:_** here the nn was set as 50, twice the default value.
+
+
+Results on figure 30 show that nn50 protocol has almost the same performance than cosine protocol in UBCF model.
+Through this graph it is possible to compare the results previously obtained present on figure 14, being possible to verify that the Romance genre negatively influences the UBCF model since the precision values for the cosine and nn50 parameters are slightly lower.
+```{r, echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the UBCF model under two different sets of parameters", fig.height=5, fig.width=5}
+recommenderlab::plot(UBCF_methods_genre_results, "prec/rec") 
+```
+
+
+```{r, movie genre Binary UBCF evaluation, include=FALSE}
+set.seed(500)
+
+binary_methods_genre <- list(UBCF= list(name = "UBCF", param = c(nn = 50)))  
+
+binary_eval_genre_results <- evaluate(binary_evals_genre, binary_methods_genre, type = "topNList", n = c(1, 2, 5)) 
+
+recommenderlab::plot(binary_eval_genre_results, "prec/rec", ylim = c(0.2,0.45)) 
+
+modelUBCF_genre <- Recommender(train_binary_genre, "UBCF",param = c(nn = 50))
+
+UBCFpreds1_genre <- predict(modelUBCF_genre, binary_known_genre, n = 1) 
+UBCFpreds2_genre <- predict(modelUBCF_genre, binary_known_genre, n = 2)
+UBCFpreds5_genre <- predict(modelUBCF_genre, binary_known_genre, n = 5)
+
+
+error_genre <- rbind(UBCFpreds1 = calcPredictionAccuracy(UBCFpreds1_genre, binary_unknown_genre, given = 1),
+               UBCFpreds2 = calcPredictionAccuracy(UBCFpreds2_genre, binary_unknown_genre, given = 1),
+               UBCFpreds5 = calcPredictionAccuracy(UBCFpreds5_genre, binary_unknown_genre, given = 1))
+
+error_genre <- as.data.frame(error_genre)
+error_genre <- dplyr::select(error_genre, recall, precision)
+error_genre <- rownames_to_column(error_genre)
+df_error_genre <- dplyr::bind_rows(error_genre,error_genre)
+
+```
+
+In order to validate the results obtained above, manual evaluation was also performed.
+```{r, echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of UBCF model"}
+ggplot() + geom_point(data = df_error_genre[4:6,], aes( x = recall, y = precision, colour = "UBCF"), alpha = 1) + geom_line(data = df_error_genre[4:6,], aes( x = recall, y = precision), colour = "green")
+```
+The results obtained and displayed in figure 31 are in agreement to the ones obtained on the first place. However, the quality prediction for the top 5 recommendation decreased significantly. 
+
+[Furthurmore, in comparison to figure 18,  it is possible to register a  slight decrease of precision values but an increase of recall values.
+For data in binary form, the Romance genre show a positive effect on the UBCF model.]
+
+
+Next, we check the influence of Romance genre in non-binary data. Since on our previously analysis the IBCF exhibited the best results when predicting movies ratings, the standard and k10 parameters were selected.  
+```{r, movie genre Non binary data, include=FALSE}
+nbdata_genre <- dplyr::select(set_genre, critic, id, rating.x)
+nbdata_genre <- nbdata_genre[nbdata_genre$critic %in% ucritics,]
+nbdata_genre <- nbdata_genre[nbdata_genre$id %in% umovies,]
+nbdata_genre <- na.omit(nbdata_genre)
+mnb_genre <- as(nbdata_genre, "realRatingMatrix") 
+set.seed(500)
+
+nonbinary_split_genre <- evaluationScheme(mnb_genre, method = "split", train = 0.8, given = 1)
+
+train_nonbinary_genre <- getData(nonbinary_split_genre,"train")
+nonbinary_known_genre <- getData(nonbinary_split_genre,"known")
+nonbinary_unknown_genre <- getData(nonbinary_split_genre,"unknown")
+rm(nonbinary_split_genre)
+```
+
+```{r, movie genre Non binary IBCF, include=FALSE}
+set.seed(500)
+
+nonbinary_evals_genre <- evaluationScheme(train_nonbinary_genre, method = "cross-validation", k = 10, given = 1, goodRating = 3)
+IBCF_methods_genre <- list(`standard IBCF` = list(name = "IBCF", param =list(method = "cosine", k = 30, normalize = NULL)),
+                     `k10 IBCF` = list(name = "IBCF", param = list(k = 10, normalize = NULL)))  
+ 
+IBCF_methods_genre_results <- evaluate(nonbinary_evals_genre, IBCF_methods_genre, type = "ratings", n = c(1, 2, 5))       
+                                             
+```
+
+
+1.**_Standard IBCF:_** according to the recommender package registry, the IBCF parameters as default are Cosine similarity method, nearest neighbors (k) as 30, the similarity matrix normalization is set as center, and alpha is set as 0.5.
+2.**_k 10 IBCF:_** here the k was set as 10, one third of the default value.
+
+As we can see in figure 32 and in comparison with figure 21, the values of error, in general, are similar, not indicating any influence of the Romance genre in the model. To validate these results, a manual evaluation was performed. 
+```{r, echo=FALSE, fig.align="center", fig.cap=" RMSE, MSE and MAE errors results for the evaluation of IBCF models under two different sets of parameters, for top 1,2 and 5 recommendation"}
+recommenderlab::plot(IBCF_methods_genre_results)
+```
+
+```{r,  echo=FALSE, fig.cap="RMSE, MSE and MAE errors results for the evaluation of IBCF method under their best performing set of parameters.", fig.align="center"}
+
+modelIBCF_genre <- Recommender(train_nonbinary_genre, "IBCF")
+
+IBCFpreds_genre <- predict(modelIBCF_genre, nonbinary_known_genre, type = "ratings")
+
+IBCF <- calcPredictionAccuracy(IBCFpreds_genre, nonbinary_unknown_genre, given = 1, goodRating = 3)
+IBCF <- as.data.frame(IBCF)
+IBCF <- IBCF %>% rownames_to_column('error')
+IBCF <- rename(IBCF, "value" = "IBCF")
+IBCF<- mutate(IBCF, 'Method' = c('IBCF'))
+df_error <- bind_rows(IBCF)
+df_error <- df_error %>% rownames_to_column('number')
+
+df_error$Method <- factor(df_error$Method, levels = unique(df_error$Method[order(df_error$number)]))
+df_error <- select(df_error, -number)
+
+ggplot(data = df_error, aes(fill = Method, x = error, y = value) ) + geom_bar(position="dodge", stat = "identity") + labs( x = NULL , y = NULL) + scale_fill_grey(start = 0.2, end = 0.8, na.value = "red")
+
+```
+The results obtained are in agreement to the ones obtained initially, presenting however slightly higher error values. 
+
+[Furthermore, in comparison to figure 24, the error values present in graphic 33 are bigger indicating that taking into account the Romance genre,  IBCF becomes a less reliable model]
+
+Thereafter the top-n critic was analyzed in the non-binary data. The Popular model was the best one before, so we tested in this context. 
+```{r, movie genre Non binary POP, include=FALSE}
+set.seed(500)
+
+POP_methods_genre <- list(`standard POP` = list(name = "POPULAR", param = NULL),
+                    `z-score POP` = list(name = "POPULAR", param = list(normalize = "z-score")))  
+
+ 
+POP_methods_genre_results <- evaluate(nonbinary_evals_genre, POP_methods_genre, type = "topNList", n = c(1, 2, 5))                                                       
+
+```
+
+For POP method, two different sets of parameters were tested:
+
+  1. **_Standard IBCF_**: according to the _recommender_ package _registry_, the Popular parameters as default normalize is set as center.
+  2. **_Z-score IBCF_**: here we changed the normalize parameter from center to z-score.
+  
+Figure 34 shows a slight increase in precision values when comparing to figure 27, but in general the context did not affect the results. To validate these results, a manual evaluation was performed.
+```{r, echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of Popular models under two different sets of parameters, for top 1,2 and 5 recommendation ", fig.height=5, fig.width=5}
+recommenderlab::plot(POP_methods_genre_results, "prec/rec") 
+rm(POP_methods_genre)
+rm(POP_methods_genre_results)
+
+```
+
+```{r, movie genre Non bianry POP evaluation, echo=FALSE}
+set.seed(500)
+
+modelPOP_genre <- Recommender(train_nonbinary_genre, "POPULAR")
+
+POPpreds1_genre <- predict(modelPOP_genre, nonbinary_known_genre, n = 1, type = "topNList") 
+POPpreds2_genre <- predict(modelPOP_genre, nonbinary_known_genre, n = 2, type = "topNList")
+POPpreds5_genre <- predict(modelPOP_genre, nonbinary_known_genre, n = 5, type = "topNList")
+
+error <- rbind(POPpreds1_genre = calcPredictionAccuracy(POPpreds1_genre, nonbinary_unknown_genre, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds2_genre = calcPredictionAccuracy(POPpreds2_genre, nonbinary_unknown_genre, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds5_genre = calcPredictionAccuracy(POPpreds5_genre, nonbinary_unknown_genre, given = 1, goodRating = 3, type = "topNList"))
+
+
+df_error_genre <- as.data.frame(error)
+df_error_genre <- dplyr::select(df_error_genre, recall, precision)
+df_error_genre <- rownames_to_column(df_error_genre)
+```
+
+```{r, echo=FALSE, fig.align="center", fig.cap="  Precision and recall results for the evaluation of Popular method under his best performing set of parameters for top 1,2 and 5 recommendation."}
+ggplot() + geom_point(data = df_error_genre[1:3,], aes( x = recall, y = precision, colour = "Popular"), alpha = 1) + geom_line(colour = "blue",data = df_error_genre[1:3,], aes( x = recall, y = precision))
+```
+The results are in agreement to the ones obtained initially. However, as we can see in figure 34, the quality prediction for the top 5 recommendation decreased significantly.
+
+[By the comparison of figures 29 and 35, it is possible to see a totally different result in the two graphics. The graphic above has the worst results than figure 29, indicating that genre has a negative effect on the Popular model.]
+
+## Movie Run-time
+The analysis of figure 7 shows that movies with run time over 120 minutes tend to present higher scores, so we select a subset comprising only these movies.
+```{r, Run-time data set preparation, include=FALSE}
+### Duracao
+set_time = rev_mov
+set_time$Time = (set_time$runtime >120)
+set_time = set_time[set_time$Time == TRUE,]
+```
+
+```{r, Run-time Binary UBCF, include=FALSE}
+final_time = dplyr::select(set_time, critic, id)
+final_time <- final_time[final_time$critic %in% ucritics,]
+final_time <- final_time[final_time$id %in% umovies,]
+
+binary_time <- as.data.frame(final_time)
+binary_time <- na.omit(binary_time)
+mb_time <- as(binary_time, "binaryRatingMatrix")  
+getRatingMatrix(mb_time)
+
+set.seed(500)
+
+binary_split_time <- evaluationScheme(mb_time, method = "split", train = 0.8, given = 1)
+train_binary_time <- getData(binary_split_time,"train")
+binary_known_time <- getData(binary_split_time,"known")
+binary_unknown_time <- getData(binary_split_time,"unknown")
+rm(binary_split_time)
+
+binary_evals_time <- evaluationScheme(train_binary_time, method = "cross-validation", k = 10, given = 1) 
+
+UBCF_methods_time <- list(`Cosine UBCF` = list(name = "UBCF", param = c(method = "cosine")),
+                           `nn 50 UBCF` = list(name = "UBCF", param = c(nn = 50)))  
+
+UBCF_methods_time_results <- evaluate(binary_evals_time, UBCF_methods_time, type = "topNList", n = c(1, 2, 5))
+```
+For UBCF method, two different sets of parameters were tested:
+
+1. **_Cosine UBCF:_** here we changed the similarity method from jaccard to cosine.
+2. **_nn 50 UBCF:_** here the nn was set as 50, twice the default value.
+
+Results on figure 36 show that nn50 protocol has a better performance than cosine protocol in UBCF model.
+Through this graph it is possible to verify similar results when compare with the data obtained in figure 14. These results indicates a neutral effect of movies run time in the model. 
+
+```{r echo=FALSE, fig.align="center", fig.cap=" Precision and recall results for the UBCF model under two different sets of parameters", fig.height=5, fig.width=5}
+recommenderlab::plot(UBCF_methods_time_results, "prec/rec") 
+```
+
+In order to validate the results obtained above, manual evaluation was also performed.
+```{r, Run-time Binary UBCF validation, include=FALSE}
+set.seed(500)
+
+binary_methods_time <- list(UBCF= list(name = "UBCF", param = c(nn = 50)))  
+
+binary_eval_time_results <- evaluate(binary_evals_time, binary_methods_time, type = "topNList", n = c(1, 2, 5)) 
+
+recommenderlab::plot(binary_eval_time_results, "prec/rec", ylim = c(0.2,0.45)) 
+
+modelUBCF_time <- Recommender(train_binary_time, "UBCF",param = c(nn = 50))
+
+UBCFpreds1_time <- predict(modelUBCF_time, binary_known_time, n = 1) 
+UBCFpreds2_time <- predict(modelUBCF_time, binary_known_time, n = 2)
+UBCFpreds5_time <- predict(modelUBCF_time, binary_known_time, n = 5)
+
+
+error_time <- rbind(UBCFpreds1 = calcPredictionAccuracy(UBCFpreds1_time, binary_unknown_time, given = 1),
+               UBCFpreds2 = calcPredictionAccuracy(UBCFpreds2_time, binary_unknown_time, given = 1),
+               UBCFpreds5 = calcPredictionAccuracy(UBCFpreds5_time, binary_unknown_time, given = 1))
+
+error_time <- as.data.frame(error_time)
+error_time <- dplyr::select(error_time, recall, precision)
+error_time <- rownames_to_column(error_time)
+df_error_time <- dplyr::bind_rows(error_time, error_time)
+```
+
+```{r, echo=FALSE, fig.align="center", fig.cap=" Precision and recall results for the evaluation of UBCF model"}
+ggplot() + geom_point(data = df_error_time[4:6,], aes( x = recall, y = precision, colour = "UBCF"), alpha = 1) + geom_line(data = df_error_time[4:6,], aes( x = recall, y = precision), colour = "green")
+```
+Overall, the results are in agreement to the ones obtained initially. However, as we can see in figure 37, the quality prediction for the top 5 recommendation decreased significantly.
+
+
+[The results in figure 37 show a decrease in precision values when comparing to figure 18. Although the recall presents an increase comparing to figure 18.]
+
+
+Next, we check the influence of run time considering non-binary data. Since IBCF was the best model, the standard and k10 parameters were selected. 
+```{r,Run-time Non binary data set preparation, include=FALSE}
+nbdata_time <- dplyr::select(set_time, critic, id, rating.x)
+nbdata_time <- nbdata_time[nbdata_time$critic %in% ucritics,]
+nbdata_time <- nbdata_time[nbdata_time$id %in% umovies,]
+nbdata_time <- na.omit(nbdata_time)
+mnb_time <- as(nbdata_time, "realRatingMatrix") 
+set.seed(500)
+
+nonbinary_split_time <- evaluationScheme(mnb_time, method = "split", train = 0.8, given = 1)
+
+train_nonbinary_time <- getData(nonbinary_split_time,"train")
+nonbinary_known_time <- getData(nonbinary_split_time,"known")
+nonbinary_unknown_time <- getData(nonbinary_split_time,"unknown")
+rm(nonbinary_split_time)
+```
+
+```{r, Run-time Non binary IBCF, include=FALSE}
+set.seed(500)
+nonbinary_evals_time <- evaluationScheme(train_nonbinary_time, method = "cross-validation", k = 10, given = 1, goodRating = 3)
+
+IBCF_methods_time <- list(`standard IBCF` = list(name = "IBCF", param =list(method = "cosine", k = 30, normalize = NULL)),
+                     `k10 IBCF` = list(name = "IBCF", param = list(k = 10, normalize = NULL)))  
+ 
+IBCF_methods_time_results <- evaluate(nonbinary_evals_time, IBCF_methods_time, type = "ratings", n = c(1, 2, 5))       
+                                             
+```
+
+1.**_Standard IBCF:_** according to the recommender package registry, the IBCF parameters as default are Cosine similarity method, nearest neighbors (k) as 30, the similarity matrix normalization is set as center, and alpha is set as 0.5.
+2.**_k 10 IBCF:_** here the k was set as 10, one third of the default value.
+
+As we can see in figure 38 and in comparison with figure 21, the values of error are, in general, similar, not indicating any influence by the run time of the films over the model. 
+
+```{r, echo=FALSE, fig.align="center", fig.cap=" RMSE, MSE and MAE errors results for the evaluation of IBCF models under two different sets of parameters, for top 1,2 and 5 recommendation"}
+recommenderlab::plot(IBCF_methods_time_results)
+```
+
+To validate these results, a manual evaluation was performed. 
+
+```{r, Run-time Non binary IBCF validation,  echo=FALSE, fig.cap="RMSE, MSE and MAE errors results for the evaluation of all tested methods under their best performing set of parameters.", fig.align="center"}
+
+modelIBCF_time <- Recommender(train_nonbinary_time, "IBCF")
+
+IBCFpreds_time <- predict(modelIBCF_time, nonbinary_known_time, type = "ratings")
+
+IBCF <- calcPredictionAccuracy(IBCFpreds_time, nonbinary_unknown_time, given = 1, goodRating = 3)
+IBCF <- as.data.frame(IBCF)
+IBCF <- IBCF %>% rownames_to_column('error')
+IBCF <- rename(IBCF, "value" = "IBCF")
+IBCF<- mutate(IBCF, 'Method' = c('IBCF'))
+df_error <- bind_rows(IBCF)
+df_error <- df_error %>% rownames_to_column('number')
+
+df_error$Method <- factor(df_error$Method, levels = unique(df_error$Method[order(df_error$number)]))
+df_error <- select(df_error, -number)
+```
+
+```{r, echo=FALSE, fig.align="center", fig.cap=" RMSE, MSE and MAE errors results for the evaluation of IBCF models under two different sets of parameters, for top 1,2 and 5 recommendation"}
+
+ggplot(data = df_error, aes(fill = Method, x = error, y = value) ) + geom_bar(position="dodge", stat = "identity") + labs( x = NULL , y = NULL) + scale_fill_grey(start = 0.2, end = 0.8, na.value = "red")
+```
+Overall, the results present on figure 39 are in agreement to the ones obtained initially, presenting only slight differences on the errors values in relation to figure 38.
+
+[In comparison with figure 24, the error values present in graphic 39 are slight bigger indicating that taking into account the Romance genre,  IBCF becomes a less reliable model.]
+
+Thereafter the top-n critic was analyzed considering non-binary data. The Popular model was the best one before so it was tested again when performing context aware analysis. 
+
+```{r, Run-time Non binary POP, include=FALSE}
+set.seed(500)
+
+POP_methods_time <- list(`standard POP` = list(name = "POPULAR", param = NULL),
+                    `z-score POP` = list(name = "POPULAR", param = list(normalize = "z-score")))  
+ 
+POP_methods_time_results <- evaluate(nonbinary_evals_time, POP_methods_time, type = "topNList", n = c(1, 2, 5))                                                       
+
+```
+
+For POP method, two different sets of parameters were tested:
+
+  1. **_Standard IBCF_**: according to the _recommender_ package _registry_, the Popular parameters as default normalize is set as center.
+  2. **_Z-score IBCF_**: here we changed the normalize parameter from center to z-score.
+  
+Figure 40 shows that precision and recall values are very similar to the ones obtained in figure 27. Hence, in general, the context did not affect the results. To validate these results, a manual evaluation was performed.
+
+
+```{r, Run-time Non binary POP validation, echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of Popular models under two different sets of parameters, for top 1,2 and 5 recommendation ", fig.height=5, fig.width=5}
+recommenderlab::plot(POP_methods_time_results, "prec/rec") 
+rm(POP_methods_time)
+rm(POP_methods_time_results)
+
+```
+```{r, run time non binary POP validation, echo=FALSE}
+set.seed(500)
+
+modelPOP_time <- Recommender(train_nonbinary_time, "POPULAR")
+
+POPpreds1_time <- predict(modelPOP_time, nonbinary_known_time, n = 1, type = "topNList") 
+POPpreds2_time <- predict(modelPOP_time, nonbinary_known_time, n = 2, type = "topNList")
+POPpreds5_time <- predict(modelPOP_time, nonbinary_known_time, n = 5, type = "topNList")
+
+error <- rbind(POPpreds1_time = calcPredictionAccuracy(POPpreds1_time, nonbinary_unknown_time, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds2_time = calcPredictionAccuracy(POPpreds2_time, nonbinary_unknown_time, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds5_time = calcPredictionAccuracy(POPpreds5_time, nonbinary_unknown_time, given = 1, goodRating = 3, type = "topNList"))
+
+
+df_error_time <- as.data.frame(error)
+df_error_time <- dplyr::select(df_error_time, recall, precision)
+df_error_time <- rownames_to_column(df_error_time)
+```
+
+```{r, echo=FALSE, fig.align="center", fig.cap="  Precision and recall results for the evaluation of Popular method under his best performing set of parameters for top 1,2 and 5 recommendation."}
+ggplot() + geom_point(data = df_error_time[1:3,], aes( x = recall, y = precision, colour = "Popular"), alpha = 1) + geom_line(colour = "blue",data = df_error_time[1:3,], aes( x = recall, y = precision))
+```
+The results differ significantly to the ones obtained initially, specially for top-2 and top-5 recommendations. However, we are not able to explain such disagreement.
+
+[By the comparison of figures 29 and 41, it is possible to see a totally different result in the two graphics. The graphic above has the worst results than figure 29, indicating that movies longer than 120 minutes have a negative effect on the Popular model.]
+
+##  Movie Rating (G,NR,PG,PG-13,R)
+Through the analysis of figure 6 we selected the Parent-guide type of movies due to the mean rating presented.
+```{r, Rating data set preparation, include=FALSE}
+set_rat = rev_mov
+set_rat$Rat = grepl("PG", rev_mov$rating.y)
+set_rat = set_rat[set_rat$Rat == TRUE,]
+
+```
+
+```{r, Rating Binary UBCF, include=FALSE}
+final_rat = dplyr::select(set_rat, critic, id)
+final_rat <- final_rat[final_rat$critic %in% ucritics,]
+final_rat <- final_rat[final_rat$id %in% umovies,]
+
+binary_rat <- as.data.frame(final_rat)
+binary_rat <- na.omit(binary_rat)
+mb_rat <- as(binary_rat, "binaryRatingMatrix")  
+getRatingMatrix(mb_rat)
+
+set.seed(500)
+
+binary_split_rat <- evaluationScheme(mb_rat, method = "split", train = 0.8, given = 1)
+train_binary_rat <- getData(binary_split_rat,"train")
+binary_known_rat <- getData(binary_split_rat,"known")
+binary_unknown_rat <- getData(binary_split_rat,"unknown")
+
+
+binary_evals_rat <- evaluationScheme(train_binary_rat, method = "cross-validation", k = 10, given = 1) 
+
+UBCF_methods_rat <- list(`Cosine UBCF` = list(name = "UBCF", param = c(method = "cosine")),
+                           `nn 50 UBCF` = list(name = "UBCF", param = c(nn = 50)))  
+
+UBCF_methods_rat_results <- evaluate(binary_evals_rat, UBCF_methods_rat, type = "topNList", n = c(1, 2, 5))
+
+rm(binary_split_rat)
+
+```
+For UBCF method, two different sets of parameters were tested:
+
+1. **_Cosine UBCF:_** here we changed the similarity method from jaccard to cosine.
+2. **_nn 50 UBCF:_** here the nn was set as 50, twice the default value.
+
+Results on figure 42 show that nn50 protocol has a better performance than cosine protocol in UBCF model.
+Furthermore, the results obtained are very similar to the ones presented on figure 14, what indicates a neutral effect of type of movie in the model. 
+
+```{r, echo=FALSE, fig.align="center", fig.cap=" Precision and recall results for the UBCF model under two different sets of parameters", fig.height=5, fig.width=5}
+recommenderlab::plot(UBCF_methods_rat_results, "prec/rec") 
+```
+
+
+In order to validate the results obtained above, manual evaluation was also performed.
+```{r, Rating Binary UBCF validation, include=FALSE}
+set.seed(500)
+
+binary_methods_rat <- list(UBCF= list(name = "UBCF", param = c(nn = 50)))  
+
+binary_eval_rat_results <- evaluate(binary_evals_rat, binary_methods_rat, type = "topNList", n = c(1, 2, 5)) 
+
+recommenderlab::plot(binary_eval_rat_results, "prec/rec", ylim = c(0.2,0.45)) 
+
+modelUBCF_rat <- Recommender(train_binary_rat, "UBCF",param = c(nn = 50))
+
+UBCFpreds1_rat <- predict(modelUBCF_rat, binary_known_rat, n = 1) 
+UBCFpreds2_rat <- predict(modelUBCF_rat, binary_known_rat, n = 2)
+UBCFpreds5_rat <- predict(modelUBCF_rat, binary_known_rat, n = 5)
+
+
+error_rat <- rbind(UBCFpreds1 = calcPredictionAccuracy(UBCFpreds1_rat, binary_unknown_rat, given = 1),
+               UBCFpreds2 = calcPredictionAccuracy(UBCFpreds2_rat, binary_unknown_rat, given = 1),
+               UBCFpreds5 = calcPredictionAccuracy(UBCFpreds5_rat, binary_unknown_rat, given = 1))
+
+error_rat <- as.data.frame(error_rat)
+error_rat <- dplyr::select(error_rat, recall, precision)
+error_rat <- rownames_to_column(error_rat)
+df_error_rat <- dplyr::bind_rows(error_rat,error_rat)
+```
+
+```{r, echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of UBCF model"}
+ggplot() + geom_point(data = df_error_rat[4:6,], aes( x = recall, y = precision, colour = "UBCF"), alpha = 1) + geom_line(data = df_error_rat[4:6,], aes( x = recall, y = precision), colour = "green")
+```
+The results obtained differ significantly to the initial, specially for top-2 and top-5 recommendations. However, we are not able to explain such disagreement.
+
+[The results in figure 43 show a decrease in precision values when comparing to figure 18. Although the recall is slightly higher when comparing to figure 18. In general, the results are similar.]
+
+
+Next, we check the influence of the type of movie considering non-binary data. Since IBCF was the best model, the standard and k10 parameters were selected. 
+```{r, Rating Non binary data set preparation, include=FALSE}
+nbdata_rat <- dplyr::select(set_rat, critic, id, rating.x)
+nbdata_rat <- nbdata_rat[nbdata_rat$critic %in% ucritics,]
+nbdata_rat <- nbdata_rat[nbdata_rat$id %in% umovies,]
+nbdata_rat <- na.omit(nbdata_rat)
+mnb_rat <- as(nbdata_rat, "realRatingMatrix") 
+set.seed(500)
+
+nonbinary_split_rat <- evaluationScheme(mnb_rat, method = "split", train = 0.8, given = 1)
+
+train_nonbinary_rat <- getData(nonbinary_split_rat,"train")
+nonbinary_known_rat <- getData(nonbinary_split_rat,"known")
+nonbinary_unknown_rat <- getData(nonbinary_split_rat,"unknown")
+rm(nonbinary_split_rat)
+```
+
+```{r, Rating Non binary IBCF, include=FALSE}
+set.seed(500)
+nonbinary_evals_rat <- evaluationScheme(train_nonbinary_rat, method = "cross-validation", k = 10, given = 1, goodRating = 3)
+IBCF_methods_rat <- list(`standard IBCF` = list(name = "IBCF", param =list(method = "cosine", k = 30, normalize = NULL)),
+                     `k10 IBCF` = list(name = "IBCF", param = list(k = 10, normalize = NULL)))  
+ 
+IBCF_methods_rat_results <- evaluate(nonbinary_evals_rat, IBCF_methods_rat, type = "ratings", n = c(1, 2, 5))       
+                                             
+```
+
+1.**_Standard IBCF:_** according to the recommender package registry, the IBCF parameters as default are Cosine similarity method, nearest neighbors (k) as 30, the similarity matrix normalization is set as center, and alpha is set as 0.5.
+2.**_k 10 IBCF:_** here the k was set as 10, one third of the default value.
+
+As we can see in figure 44 and in comparison with figure 21, the values of error are, in general, similar, not indicating any influence of the type of movie in the model. 
+```{r, echo=FALSE, fig.align="center", fig.cap="RMSE, MSE and MAE errors results for the evaluation of IBCF models under two different sets of parameters, for top 1,2 and 5 recommendation"}
+recommenderlab::plot(IBCF_methods_rat_results)
+```
+
+
+To validate these results, a manual evaluation was performed. 
+```{r, Rating Non binary IBCF validation, echo=FALSE, fig.cap="RMSE, MSE and MAE errors results for the evaluation of all tested methods under their best performing set of parameters.", fig.align="center"}
+
+modelIBCF_rat <- Recommender(train_nonbinary_rat, "IBCF")
+
+IBCFpreds_rat <- predict(modelIBCF_rat, nonbinary_known_rat, type = "ratings")
+
+IBCF <- calcPredictionAccuracy(IBCFpreds_rat, nonbinary_unknown_rat, given = 1, goodRating = 3)
+IBCF <- as.data.frame(IBCF)
+IBCF <- IBCF %>% rownames_to_column('error')
+IBCF <- rename(IBCF, "value" = "IBCF")
+IBCF<- mutate(IBCF, 'Method' = c('IBCF'))
+df_error <- bind_rows(IBCF)
+df_error <- df_error %>% rownames_to_column('number')
+
+df_error$Method <- factor(df_error$Method, levels = unique(df_error$Method[order(df_error$number)]))
+df_error <- select(df_error, -number)
+```
+
+```{r, echo=FALSE, fig.align="center", fig.cap=" RMSE, MSE and MAE errors results for the evaluation of IBCF models under two different sets of parameters, for top 1,2 and 5 recommendation"}
+ggplot(data = df_error, aes(fill = Method, x = error, y = value) ) + geom_bar(position="dodge", stat = "identity") + labs( x = NULL , y = NULL) + scale_fill_grey(start = 0.2, end = 0.8, na.value = "red")
+```
+The results obtained are in agreement to the initial ones, even thought RMSE value is particularly higher.
+
+[In comparison with figure 24, the error values present in graphic 45 are lower indicating that taking into account the type of movie,  IBCF becomes more reliable.]
+
+Thereafter the top-n critic was analyzed considering non-binary data. The Popular model was the best one before and hence it was tested in this context.
+
+```{r, Rating Non binary POP, include=FALSE}
+set.seed(500)
+
+POP_methods_rat <- list(`standard POP` = list(name = "POPULAR", param = NULL),
+                    `z-score POP` = list(name = "POPULAR", param = list(normalize = "z-score")))  
+
+ 
+POP_methods_rat_results <- evaluate(nonbinary_evals_rat, POP_methods_rat, type = "topNList", n = c(1, 2, 5))                                                       
+
+```
+
+For POP method, unlike for the binary setup, two different sets of parameters were tested:
+
+  1. **_Standard IBCF_**: according to the _recommender_ package _registry_, the Popular parameters as default normalize is set as center.
+  2. **_Z-score IBCF_**: here we changed the normalize parameter from center to z-score.
+
+The results showed on figure 46 are identical to the ones obtained on figure 27, exhibiting however slightly higher recall values. Thus, in general, the context did not affect the results. To validate these results, a manual evaluation was performed.
+
+
+```{r, echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of Popular models under two different sets of parameters, for top 1,2 and 5 recommendation ", fig.height=5, fig.width=5}
+recommenderlab::plot(POP_methods_rat_results, "prec/rec") 
+rm(POP_methods_rat)
+rm(POP_methods_rat_results)
+
+```
+
+```{r, Rating Non binary POP evaluation, echo=FALSE}
+set.seed(500)
+
+modelPOP_rat <- Recommender(train_nonbinary_rat, "POPULAR")
+
+POPpreds1_rat <- predict(modelPOP_rat, nonbinary_known_rat, n = 1, type = "topNList") 
+POPpreds2_rat <- predict(modelPOP_rat, nonbinary_known_rat, n = 2, type = "topNList")
+POPpreds5_rat <- predict(modelPOP_rat, nonbinary_known_rat, n = 5, type = "topNList")
+
+error <- rbind(POPpreds1_rat = calcPredictionAccuracy(POPpreds1_rat, nonbinary_unknown_rat, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds2_rat = calcPredictionAccuracy(POPpreds2_rat, nonbinary_unknown_rat, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds5_rat = calcPredictionAccuracy(POPpreds5_rat, nonbinary_unknown_rat, given = 1, goodRating = 3, type = "topNList"))
+
+
+df_error_rat <- as.data.frame(error)
+df_error_rat <- dplyr::select(df_error_rat, recall, precision)
+df_error_rat <- rownames_to_column(df_error_rat)
+```
+
+```{r, echo=FALSE, fig.align="center", fig.cap="  Precision and recall results for the evaluation of Popular method under his best performing set of parameters for top 1,2 and 5 recommendation."}
+ggplot() + geom_point(data = df_error_rat[1:3,], aes( x = recall, y = precision, colour = "Popular"), alpha = 1) + geom_line(colour = "blue",data = df_error_rat[1:3,], aes( x = recall, y = precision))
+```
+The results obtained differ significantly to the initial ones, specially for top-2 and top-5 recommendations. However, we are not able to explain such disagreement.
+
+[By the comparison of figures 29 and 47, it is possible to see a totally different graphic. The graphic above has a descendent curve but the results are similar to the ones in figure 29, indicating that movies longer than 120 minutes have a negative effect on the Popular model.]
+
+
+
+##Reviews Date
+Finally, the analysis of figure 2 reveals that the majority of the films reviewed are from 2010 until the present. Hence, to infer the influence of review date on the model's quality, and attending that we were not able to develop the models considering date distribution, we selected the most recent movies reviews since 2010.
+
+```{r, Date data set preparation, include=FALSE}
+set_year = rev_mov
+set_year = set_year[set_year$Year > 2010,]
+
+```
+
+```{r, Date Binary UBCF, include=FALSE}
+final_year = dplyr::select(set_year, critic, id)
+final_year <- final_year[final_year$critic %in% ucritics,]
+final_year <- final_year[final_year$id %in% umovies,]
+
+binary_year <- as.data.frame(final_year)
+binary_year <- na.omit(binary_year)
+mb_year <- as(binary_year, "binaryRatingMatrix")  
+getRatingMatrix(mb_year)
+
+set.seed(500)
+
+binary_split_year <- evaluationScheme(mb_year, method = "split", train = 0.8, given = 1)
+train_binary_year <- getData(binary_split_year,"train")
+binary_known_year <- getData(binary_split_year, "known")
+binary_unknown_year <- getData(binary_split_year,"unknown")
+
+
+binary_evals_year <- evaluationScheme(train_binary_year, method = "cross-validation", k = 10, given = 1) 
+
+UBCF_methods_year <- list(`Cosine UBCF` = list(name = "UBCF", param = c(method = "cosine")),
+                           `nn 50 UBCF` = list(name = "UBCF", param = c(nn = 50)))  
+
+UBCF_methods_year_results <- evaluate(binary_evals_year, UBCF_methods_year, type = "topNList", n = c(1, 2, 5))
+
+rm(binary_split_year)
+
+```
+For UBCF method, two different sets of parameters were tested:
+
+1. **_Cosine UBCF:_** here we changed the similarity method from jaccard to cosine.
+2. **_nn 50 UBCF:_** here the nn was set as 50, twice the default value.
+
+
+Results on figure 48 show that cosine protocol has a better performance than nn50 protocol in UBCF model.
+Furthermore, we verified  that the results obtained are slightly lower when compare to the ones obtained previously (figure 14), even thought we do not find the differences significant. Thus, these results indicate a neutral effect of reviews date over the model prediction accuracy. 
+```{r,  echo=FALSE, fig.align="center", fig.cap=" Precision and recall results for the UBCF model under two different sets of parameters", fig.height=5, fig.width=5}
+recommenderlab::plot(UBCF_methods_year_results, "prec/rec") 
+```
+In order to validate the results obtained above, manual evaluation was also performed.
+```{r, Date Binary UBCFF validation, include=FALSE}
+set.seed(500)
+
+binary_methods_year <- list(UBCF= list(name = "UBCF", param = c(nn = 50)))  
+
+binary_eval_year_results <- evaluate(binary_evals_year, binary_methods_year, type = "topNList", n = c(1, 2, 5)) 
+
+recommenderlab::plot(binary_eval_year_results, "prec/rec", ylim = c(0.2,0.45)) 
+
+modelUBCF_year <- Recommender(train_binary_year, "UBCF",param = c(nn = 50))
+
+UBCFpreds1_year <- predict(modelUBCF_year, binary_known_year, n = 1) 
+UBCFpreds2_year <- predict(modelUBCF_year, binary_known_year, n = 2)
+UBCFpreds5_year <- predict(modelUBCF_year, binary_known_year, n = 5)
+
+
+error_year <- rbind(UBCFpreds1 = calcPredictionAccuracy(UBCFpreds1_year, binary_unknown_year, given = 1),
+               UBCFpreds2 = calcPredictionAccuracy(UBCFpreds2_year, binary_unknown_year, given = 1),
+               UBCFpreds5 = calcPredictionAccuracy(UBCFpreds5_year, binary_unknown_year, given = 1))
+
+error_year <- as.data.frame(error_year)
+error_year <- dplyr::select(error_year, recall, precision)
+error_year <- rownames_to_column(error_year)
+df_error_year <- dplyr::bind_rows(error_year,error_year)
+
+rm(UBCFpreds1_year)
+rm(UBCFpreds2_year)
+rm(UBCFpreds5_year)
+
+```
+
+```{r,  echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of UBCF model"}
+ggplot() + geom_point(data = df_error_year[4:6,], aes( x = recall, y = precision, colour = "UBCF"), alpha = 1) + geom_line(data = df_error_year[4:6,], aes( x = recall, y = precision), colour = "green")
+```
+The results obtained differ significantly to the initial ones, specially for top-2 and top-5 recommendations. However, we are not able to explain such disagreement.
+
+[The results in figure 49 show identic values when comparing to figure 18. Although the recall is slightly higher when comparing to figure 18. In general, the results are similar.]
+
+
+Next, we check the influence of the reviews date in the model's quality considering non-binary data. Since on our previously analysis the IBCF exhibited the best results when predicting movies ratings, the standard and k10 parameters were selected. 
+```{r, Date Non binary data set preparation, include=FALSE}
+nbdata_year <- dplyr::select(set_year, critic, id, rating.x)
+nbdata_year <- nbdata_year[nbdata_year$critic %in% ucritics,]
+nbdata_year <- nbdata_year[nbdata_year$id %in% umovies,]
+nbdata_year <- na.omit(nbdata_year)
+mnb_year <- as(nbdata_year, "realRatingMatrix") 
+set.seed(500)
+
+nonbinary_split_year <- evaluationScheme(mnb_year, method = "split", train = 0.8, given = 1)
+
+train_nonbinary_year <- getData(nonbinary_split_year,"train")
+nonbinary_known_year <- getData(nonbinary_split_year,"known")
+nonbinary_unknown_year <- getData(nonbinary_split_year,"unknown")
+rm(nonbinary_split_year)
+```
+
+```{r, Date Non binary IBCF, include=FALSE}
+set.seed(500)
+nonbinary_evals_year <- evaluationScheme(train_nonbinary_year, method = "cross-validation", k = 10, given = 1, goodRating = 3)
+IBCF_methods_year <- list(`standard IBCF` = list(name = "IBCF", param =list(method = "cosine", k = 30, normalize = NULL)),
+                     `k10 IBCF` = list(name = "IBCF", param = list(k = 10, normalize = NULL)))  
+ 
+IBCF_methods_year_results <- evaluate(nonbinary_evals_year, IBCF_methods_year, type = "ratings", n = c(1, 2, 5))       
+                                             
+```
+
+1.**_Standard IBCF:_** according to the recommender package registry, the IBCF parameters as default are Cosine similarity method, nearest neighbors (k) as 30, the similarity matrix normalization is set as center, and alpha is set as 0.5.
+2.**_k 10 IBCF:_** here the k was set as 10, one third of the default value.
+
+As we can see in figure 50 and in comparison with figure 21, the values of error are, in general, similar, not indicating any influence reviews date over the model. 
+
+```{r, echo=FALSE, fig.align="center", fig.cap="RMSE, MSE and MAE errors results for the evaluation of IBCF models under two different sets of parameters, for top 1,2 and 5 recommendation"}
+recommenderlab::plot(IBCF_methods_year_results)
+```
+
+To validate these results, a manual evaluation was performed. 
+```{r, Date Non binary IBCF validation, echo=FALSE, fig.cap="RMSE, MSE and MAE errors results for the evaluation of all tested methods under their best performing set of parameters.", fig.align="center"}
+
+modelIBCF_year <- Recommender(train_nonbinary_year, "IBCF")
+
+IBCFpreds_year <- predict(modelIBCF_year, nonbinary_known_year, type = "ratings")
+
+IBCF <- calcPredictionAccuracy(IBCFpreds_year, nonbinary_unknown_year, given = 1, goodRating = 3)
+IBCF <- as.data.frame(IBCF)
+IBCF <- IBCF %>% rownames_to_column('error')
+IBCF <- rename(IBCF, "value" = "IBCF")
+IBCF<- mutate(IBCF, 'Method' = c('IBCF'))
+df_error <- bind_rows(IBCF)
+df_error <- df_error %>% rownames_to_column('number')
+
+df_error$Method <- factor(df_error$Method, levels = unique(df_error$Method[order(df_error$number)]))
+df_error <- select(df_error, -number)
+```
+
+```{r, echo=FALSE, fig.align="center", fig.cap=" RMSE, MSE and MAE errors results for the evaluation of IBCF models under two different sets of parameters, for top 1,2 and 5 recommendation"}
+
+ggplot(data = df_error, aes(fill = Method, x = error, y = value) ) + geom_bar(position="dodge", stat = "identity") + labs( x = NULL , y = NULL) + scale_fill_grey(start = 0.2, end = 0.8, na.value = "red")
+```
+The results obtained are in agreement to the initial ones, even thought RMSE value is particularly higher.
+
+[In comparison with figure 24, the error values present in graphic 51 are lower indicating that taking into account the visualization year,  IBCF becomes more reliable.]
+
+Thereafter the top-n recommendations were analyzed considering non-binary data. The Popular model was the best one before it was tested in this context.
+```{r, Date Non binary POP, include=FALSE}
+set.seed(500)
+
+POP_methods_year <- list(`standard POP` = list(name = "POPULAR", param = NULL),
+                    `z-score POP` = list(name = "POPULAR", param = list(normalize = "z-score")))  
+
+ 
+POP_methods_year_results <- evaluate(nonbinary_evals_year, POP_methods_year, type = "topNList", n = c(1, 2, 5))                                                       
+
+```
+
+For POP method two different sets of parameters were tested:
+
+  1. **_Standard IBCF_**: according to the _recommender_ package _registry_, the Popular parameters as default normalize is set as center.
+  2. **_Z-score IBCF_**: here we changed the normalize parameter from center to z-score.
+  
+Results on figure 52 exhibit slightly higher precision and recall values in comparison to the ones observe on figure 27, indicating a positive effect of the reviews date in the model. However, we are not sure if this differences are enough to be considered significant. To validate these results, a manual evaluation was performed.
+
+```{r,  echo=FALSE, fig.align="center", fig.cap="Precision and recall results for the evaluation of Popular models under two different sets of parameters, for top 1,2 and 5 recommendation ", fig.height=5, fig.width=5}
+recommenderlab::plot(POP_methods_year_results, "prec/rec") 
+rm(POP_methods_year)
+rm(POP_methods_year_results)
+
+```
+```{r, Date Non binary POP validation, echo=FALSE}
+set.seed(500)
+
+modelPOP_year <- Recommender(train_nonbinary_year, "POPULAR")
+
+POPpreds1_year <- predict(modelPOP_year, nonbinary_known_year, n = 1, type = "topNList") 
+POPpreds2_year <- predict(modelPOP_year, nonbinary_known_year, n = 2, type = "topNList")
+POPpreds5_year <- predict(modelPOP_year, nonbinary_known_year, n = 5, type = "topNList")
+
+error <- rbind(POPpreds1 = calcPredictionAccuracy(POPpreds1_year, nonbinary_unknown_year, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds2 = calcPredictionAccuracy(POPpreds2_year, nonbinary_unknown_year, given = 1, goodRating = 3, type = "topNList"),
+               POPpreds5 = calcPredictionAccuracy(POPpreds5_year, nonbinary_unknown_year, given = 1, goodRating = 3, type = "topNList"))
+
+
+df_error_year <- as.data.frame(error)
+df_error_year <- dplyr::select(df_error_year, recall, precision)
+df_error_year <- rownames_to_column(df_error_year)
+```
+
+```{r echo=FALSE, fig.align="center", fig.cap="  Precision and recall results for the evaluation of Popular method under his best performing set of parameters for top 1,2 and 5 recommendation."}
+ggplot() + geom_point(data = df_error_year[1:3,], aes( x = recall, y = precision, colour = "Popular"), alpha = 1) + geom_line(colour = "blue",data = df_error_year[1:3,], aes( x = recall, y = precision))
+```
+The results obtained differ significantly to the initial ones, specially for top-2 and top-5 recommendations. However, we are not able to explain such disagreement.
+
+[By the comparison of figures 29 and 53, it is possible to see a totally different graphic. The graphic above has a descendent curve but the results are slightly better to the ones in figure 29, indicating that visualization years have a neutral/positive effect on the Popular model.]
+
+
+
+
+# Conclusions, shortcomings and future work
+In general, we believe we performed all the tasks required to successfully complete the assignment. 
+
+For binary data, our results show that the UBCF method is the one that performs better recommendations based on precision and recall evaluation (figure 17 and 18). Particularly on this analysis, we choose to select the model that exhibited a more balanced compromise between the two measures, attending that AR model also presented good results yet more unbalanced.
+
+When considering non-binary data, two options were accessed: the prediction of movies ratings or the top-n movies recommendation. For the first approach, IBCF exhibited the best performance (figure 23 and 24). However, for top-n movies recommendation, POP model was the one that showed best results attending that, once more, we prioritized the compromise between precision and recall (figure 28 and 29). We could not find an explanation for these different results although curiously we noticed that the performance of POP model is the same for the both approaches, only the performance of UBCF and IBCF significantly decreased when making movies recommendations. 
+
+Since UBCF exhibited the best results for binary data, and attending to the already existing knowledge, we were expecting to obtain similar results for non-binary data. However, for some reason, the introduction of rating information lead to a decrease of the models performance. A reasonable explanation for this phenomenon is the possibility of the ratings submitted by the critics to be biased, not being able to express an accurate relation among movies and hence providing wrong recommendations. However, not final conclusions can be made over this subject.
+
+Overall, in contrast to what we were expecting, the context aware analysis did not exhibited significant different results in comparison to the analysis performed initially. However, we encounter some problems while manually validating the obtained results using __Recommender__ and __predict__ functions. In fact, in almost all examples, we observed a significant disagreement between both results, specially when considering top-2 and top-5 recommendations. We can not infer for sure the cause for this inconsistent results. However, a possible explanation is the reduced dimension of the data sets used, attending that for each analysis a specific context was being considered, what consequently leads to a reduction of entries. In fact, the lack of improvement when taking into account specific context may be in part due to the insufficiency of the available data to make good quality recommendations. 
+
+In general, the major bottleneck encountered was to perform parameter tuning of the different approaches that ensured all models were fully and correctly functioning, and, simultaneously, enabled their distinction. In fact, as seen in many graphical representations of the results, selection of the models is not always obvious and the occurrence of many overlaps can be observed. Furthermore, there are some modeling inconsistencies that we were not able to explain such as: I) the great differences between binary and non-binary data results; II) the different results when validating our initial conclusions through **calcPredictionAccuracy**, namely for IBCF modeling when using non-binary data (figure 28 and 29) and in context aware analysis; III) the different results obtained when performing ratings prediction or movies recommendation using non-binary data (figures 23 and 24, 28 and 29, respectively).
+
+Moreover, we were not able to take the reviews date in consideration for the model's development, what should be accomplished in future works. Instead, as compensation, we considered only the most recent reviews when constructing context aware recommendations to access the dates influence on recommendations quality, if any. Furthermore, we believe a text mining analysis of the reviews description would provide valuable information for recommendations acquisition. 
+
+In relation to execution time, we did not found any constraints when running any of the models. Among all, only AR models were slightly slower than the remaining, as expected, although we do not find the differences significant neither enough cause to discard the models. 
+
+
+
+
+
+# References
+  1. Salehan, M., Mousavizadeh, M., & Koohikamali, M. (2015). A Recommender System for Online Consumer Reviews.
+  2. Khan, S. A., Liang, Y., & Shahzad, S. (2015). An empirical study of perceived factors affecting customer satisfaction to re-purchase intention in online stores in China. Journal of Service Science and Management, 8(03), 291.
+  3. Beineke, P., Hastie, T., Manning, C., & Vaithyanathan, S. (2004). Exploring sentiment summarization. In Proceedings of the AAAI spring symposium on exploring attitude and affect in text: theories and applications (Vol. 39). Palo Alto, CA: The AAAI Press.
+  4. Gorakala, S. K., & Usuelli, M. (2015). Building a recommendation system with R. Packt Publishing Ltd.

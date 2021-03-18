@@ -1,0 +1,191 @@
+library(readr)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(shiny)
+library(scales)
+library(ggiraph)
+Sys.setenv(TZ='')
+#TIME ZONES! adaptar às duas
+#Por conveniencia consideramos so os jogs em casa senao TZs era bagunça total.
+### e até faz sentido
+#o range dos dados matches o da NBA
+#comparar c mm horas a outros dias p eliminar causalidade
+
+
+##PRE PROCESS NBA DATASET
+setwd("~/Documents/Mestrado/VD/proj/parte2/9-NBA")
+d<-read.csv("2012-18_officialBoxScore.csv", header=TRUE)
+d$gmDate<-as.POSIXct(d$gmDate,format="%Y-%m-%d")
+nba<-unique(d[d$teamAbbr=="CHI" &
+         d$gmDate < as.POSIXct("2017-01-01",format="%Y-%m-%d") &
+         d$teamLoc=="Home",c(1,2,6,9,10)])
+colnames(nba)[1]<-"start.time"
+nba$start.time<-paste(as.character(nba$start.time),as.character(nba$gmTime))
+nba$start.time<- as.POSIXct(nba$start.time,format="%Y-%m-%d %H:%M")
+nba$end.time<-nba$start.time + 138*60 #138 minutos É A DURAÇÃO MEDIA
+nba$end.time<-as.POSIXct(nba$end.time)
+rownames(nba)<-c(1:181)
+
+#corrigir am pm
+ind<-rownames(subset(nba,start.time >= as.POSIXct("2016-10-27 08:00:00",format="%Y-%m-%d %I:%M"),select=start.time))
+nba[ind,"start.time"]<- nba[ind,"start.time"]+12*60*60
+nba[ind,"end.time"]<- nba[ind,"end.time"]+12*60*60
+nba<-nba[,-2]
+
+
+
+
+#Adapt to both chicago tzs
+rownames_summer<-as.numeric(rownames(nba[format(nba$start.time,"%m-%d %H") >=
+      format(as.POSIXct("03-10 02",format="%m-%d %H"),"%m-%d %H") &
+      format(nba$start.time,"%m-%d %H") <= 
+      format(as.POSIXct("11-03 02",format="%m-%d %H"),"%m-%d %H"),]))
+
+nba[-rownames_summer,"start.time"]<- nba[-rownames_summer,"start.time"] - 60*60
+nba[-rownames_summer,"end.time"]<- nba[-rownames_summer,"end.time"] - 60*60
+
+  
+#CHICAGO DATASET
+d2<-read_csv("Sample_CORRECTED.csv")
+d2 <- d2 %>% mutate(Date=as.POSIXct(Date,format='%m/%d/%Y %I:%M:%S %p'))
+
+data<- d2  %>% filter(d2$Date>= as.POSIXct("2012-10-31") & d2$Date<= as.POSIXct("2016-12-31")) %>%
+  select(c(4,12:15))
+rownames(data)<-c(1:812839)
+
+data$Game<-numeric(length=812839)
+data<- data %>% arrange(Date)
+
+for (k in c(1:nrow(nba))){
+  data[data[,"Date"][[1]] >= nba[k,"start.time"][[1]] & 
+       data[,"Date"][[1]] <= nba[k,"end.time"][[1]],"Game"]<-1 
+}
+
+
+#dataframes finais: df e nba
+data$Date2<-format(data$Date,format="%Y-%m-%d %H")
+df<-data.frame(table(data$Date2))
+colnames(df)<-c("Date","Freq")
+df$Date<-as.POSIXct(df$Date,format="%Y-%m-%d %H")
+df$Hour<-format(df$Date,format="%H:%M")
+
+#vizualização exeplo
+
+rect <- data.frame(xmin=nba$start.time, xmax=nba$end.time,res=nba$teamRslt, ymin=-Inf, ymax=Inf)
+dates<-seq(date(df$Date[[1]]),date(df$Date[[nrow(df)]]),by=1)
+
+g<-ggplot(df[1:100,],aes(x=Date,y=Freq,group=1)) + 
+  geom_rect(data=rect[1:2,], aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax,fill=factor(res)),
+            alpha=0.5,
+            inherit.aes = FALSE) + 
+  geom_line() + 
+  geom_point_interactive(aes(tooltip=paste("Hour:",Hour, "\n Nr Crimes:",Freq))) + 
+  scale_fill_manual(values=c("Green", "Red"),labels=c("Win", "Loss")) +
+  scale_x_datetime("Date", date_breaks = "1 days") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+legend <- g_legend(g) 
+grid.draw(legend) 
+
+
+girafe(print(g))
+
+
+
+#alternativa sucinta
+#df so com as horas a que ha jogos
+#quero comparar o nr de crimes que ha as 19 quando ha jogo vs qd nao ha
+
+###WARNING 94% DOS JOGOS entre as 19 e as 22
+h_<-table(format(nba$start.time,format="%H"))
+(h_[[5]] + h_[[6]])/sum(h)
+
+data$hour<-format(data$Date,format="%H:%M")
+alt2<-data[data$hour>="19:00" | data$hour=="00:00",]
+alt2$day<-format(alt2$Date,format="%Y-%m-%d")
+
+#numero de crimes por dia
+alt3<-data.frame(table(alt2$day,alt2$hour,alt2$Game))
+alt3<-alt3[alt3$Freq!=0,]
+
+alt4<-data.frame(game=numeric(),mean=numeric())
+  for (k in c(0,1)){
+  mean=mean(alt3[alt3$Var3==k,"Freq"])
+  game=k
+  row<-data.frame(game=game,mean=mean)
+  alt4<-rbind(alt4,row)
+}
+alt4[alt4$game==1,"game"]<-"Game"
+alt4[alt4$game==0,"game"]<-"No Game"
+
+
+ggplot(alt4,aes(x=factor(game),y=mean)) + geom_bar(width=0.5,alpha=0.85,fill=c("blue","orange"),stat="identity") +
+  scale_fill_discrete(labels=c("No Game", "Game"),name="Game?") +
+  xlab("")+
+  ylab("Mean Number of Crimes") +
+  ggtitle("Number of Crimes and NBA Games",subtitle = "(Only considering hours where games occur)")
+             
+          
+ui <- fluidPage(
+  sidebarPanel( 
+    dateRangeInput("Data","Date:",min=dates[1], max =dates[nrow(dates)],start=dates[1],end=dates[3]),
+    #sliderInput("Data", "Date:",min =df$Date[[1]], max =df$Date[[nrow(df)]] ,step=1*60,value=c(df$Date[[1]],df$Date[[3]])),
+    checkboxInput("optlayer", label = "NBA Games", value = FALSE)),
+    #dateInput("Data", "Date:", value=df$Date[[1]] ,
+  mainPanel(ggiraphOutput("plot2")))
+
+server <- function(input,output){
+  
+  dat <- reactive({
+    test <- df[date(df$Date) >= min(input$Data) & date(df$Date) <= max(input$Data),]
+    print(test)
+    test
+  })
+  
+  re <- reactive({
+    t <- rect[date(rect$xmin)>= min(input$Data) & date(rect$xmax)<= max(input$Data),]
+    print(t)
+    t
+  })
+  
+
+  output$plot2<-renderggiraph({
+    
+    p<- ggplot(dat(),aes(x=Date,y=Freq,group=1)) + geom_line() +
+      geom_point_interactive(aes(tooltip=paste("Hour:",Hour, "\n Nr Crimes:",Freq))) + 
+      ggtitle("Criminality Throughout Time") +
+      theme(plot.title = element_text(hjust = 0.5,size=25),axis.text.x = element_text(angle = 90, hjust = 1))
+    x<-girafe(print(p))
+    x<-girafe_options(x=x,opts_tooltip(css="background-color:grey;font-style:italic;font-size=6;"),
+                      opts_sizing(rescale = FALSE),opts_hover(css="stroke:lightgrey;fill:lightgrey;"))
+    
+    
+
+    if (input$optlayer) {
+      p <- ggplot(dat(),aes(x=Date,y=Freq,group=1)) + 
+        geom_rect(data=re(), aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax,fill=factor(res)),
+                  alpha=0.5,
+                  inherit.aes = FALSE) + 
+        geom_line() + 
+        ggtitle("Criminality Throughout Time") +
+        geom_point_interactive(aes(tooltip=paste("Hour:",Hour, "\n Nr Crimes:",Freq))) + 
+        scale_fill_manual(values=c("Green", "Red"),labels=c("Win", "Loss"),name="Game Outcome") +
+        scale_x_datetime("Date", date_breaks = "1 days") +
+        theme(plot.title = element_text(hjust = 0.5,size=25),axis.text.x = element_text(angle = 90, hjust = 1))
+    }
+    x<-girafe(print(p))
+    x<-girafe_options(x=x,opts_tooltip(css="background-color:grey;font-style:italic;font-size=6;"),
+                      opts_sizing(rescale = FALSE),opts_hover(css="stroke:lightgrey;fill:lightgrey;"))
+    
+    
+  })
+}
+  
+
+shinyApp(ui, server)
+
+
+
+library(rsconnect)
+deployApp(appName = "lalala")
+
